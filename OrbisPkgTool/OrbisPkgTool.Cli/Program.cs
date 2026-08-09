@@ -100,6 +100,10 @@ try
         case "restruct":
             RunRestructure(cmdArgs[1..]);
             break;
+        case "pfscompare":
+        case "pfscmp":
+            RunPfsCompare(cmdArgs[1..]);
+            break;
         case "trp":
             RunTrp(cmdArgs[1..]);
             break;
@@ -536,6 +540,152 @@ static void RunRestructure(string[] args)
     if (File.Exists(bak)) { File.Delete(bak); Console.WriteLine("  Deleted: param.sfo.original"); }
 
     Console.WriteLine("Restructure complete. Ready for gp4gen.");
+}
+
+/// <summary>
+/// Compares two raw PFS images byte-by-byte for debugging compatibility.
+/// Usage: pfscompare <our.pfs> <orbis.pfs>
+/// </summary>
+static void RunPfsCompare(string[] args)
+{
+    if (args.Length < 2) { Console.Error.WriteLine("usage: pfscompare <our.pfs> <orbis.pfs>"); return; }
+    byte[] ours = File.ReadAllBytes(args[0]), orbis = File.ReadAllBytes(args[1]);
+    int minLen = Math.Min(ours.Length, orbis.Length);
+    var h = Console.Out;
+
+    // --- Header fields (LE) ---
+    h.WriteLine("=== PFS HEADER ===");
+    (string, int, int)[] hdrFields = {
+        ("version", 0x00, 8), ("magic", 0x08, 4), ("id", 0x0C, 8),
+        ("fmode", 0x14, 1), ("clean", 0x15, 1), ("ro", 0x16, 1), ("rsv", 0x17, 1),
+        ("mode", 0x18, 2), ("unk1", 0x1A, 2), ("blocksz", 0x1C, 4),
+        ("nbackup", 0x20, 4), ("nblock", 0x24, 8), ("ndinode", 0x2C, 8),
+        ("ndblock", 0x34, 8), ("ndinodeblock", 0x3C, 8),
+        ("superroot_ino", 0x44, 8), ("seed", 0x370, 16)
+    };
+    h.WriteLine($"{"Field",-20} {"Ours",-22} {"Orbis",-22} Match");
+    foreach (var (name, off, sz) in hdrFields)
+    {
+        if (off + sz > minLen) continue;
+        string ov = sz switch { 1 => $"{ours[off]:X2}", 2 => $"{BitConverter.ToUInt16(ours,off):X4}", 4 => $"{BitConverter.ToUInt32(ours,off):X8}", 8 => $"{BitConverter.ToUInt64(ours,off):X16}", 16 => Convert.ToHexString(ours.AsSpan((int)off,16)), _ => "" };
+        string rv = sz switch { 1 => $"{orbis[off]:X2}", 2 => $"{BitConverter.ToUInt16(orbis,off):X4}", 4 => $"{BitConverter.ToUInt32(orbis,off):X8}", 8 => $"{BitConverter.ToUInt64(orbis,off):X16}", 16 => Convert.ToHexString(orbis.AsSpan((int)off,16)), _ => "" };
+        h.WriteLine($"{name,-20} {ov,-22} {rv,-22} {(ov==rv?"SAME":"DIFF")}");
+    }
+
+    // --- Inode table (block 1, D32: 0xA8 each) ---
+    h.WriteLine("\n=== INODE TABLE (D32, 0xA8 each, block 1 at offset 0x10000) ===");
+    long inoOff = 0x10000;
+    long ourNd = BitConverter.ToInt64(ours, 0x2C);
+    long orbNd = BitConverter.ToInt64(orbis, 0x2C);
+    long maxNd = Math.Min(ourNd, orbNd);
+    for (long i = 0; i < maxNd; i++)
+    {
+        long o = inoOff + i * 0xA8;
+        if (o + 0xA8 > minLen) break;
+        h.WriteLine($"\n  --- Inode {i} ---");
+        h.WriteLine($"  {"Field",-14} {"Ours",-22} {"Orbis",-22}");
+        ushort om = BitConverter.ToUInt16(ours,(int)o), rm = BitConverter.ToUInt16(orbis,(int)o);
+        ushort onk = BitConverter.ToUInt16(ours,(int)o+2), rnk = BitConverter.ToUInt16(orbis,(int)o+2);
+        uint ofl = BitConverter.ToUInt32(ours,(int)o+4), rfl = BitConverter.ToUInt32(orbis,(int)o+4);
+        long osz = BitConverter.ToInt64(ours,(int)o+8), rsz = BitConverter.ToInt64(orbis,(int)o+8);
+        uint obl = BitConverter.ToUInt32(ours,(int)o+84), rbl = BitConverter.ToUInt32(orbis,(int)o+84);
+        int odb0 = BitConverter.ToInt32(ours,(int)o+88), rdb0 = BitConverter.ToInt32(orbis,(int)o+88);
+        h.WriteLine($"  {"mode",-14} 0x{om:X4},22 0x{rm:X4},22 {(om==rm?"SAME":"DIFF")}");
+        h.WriteLine($"  {"nlink",-14} {onk,22} {rnk,22} {(onk==rnk?"SAME":"DIFF")}");
+        h.WriteLine($"  {"flags",-14} 0x{ofl:X8},22 0x{rfl:X8},22 {(ofl==rfl?"SAME":"DIFF")}");
+        h.WriteLine($"  {"size",-14} {osz,22} {rsz,22} {(osz==rsz?"SAME":"DIFF")}");
+        h.WriteLine($"  {"blocks",-14} {obl,22} {rbl,22} {(obl==rbl?"SAME":"DIFF")}");
+        h.WriteLine($"  {"db0",-14} {odb0,22} {rdb0,22} {(odb0==rdb0?"SAME":"DIFF")}");
+        // Raw bytes
+        bool same = ours.AsSpan((int)o, 0xA8).SequenceEqual(orbis.AsSpan((int)o, 0xA8));
+        h.WriteLine($"  raw 0xA8 bytes: {(same?"SAME":"DIFF")}");
+        if (!same) {
+            for (int b=0; b<0xA8; b+=8) {
+                string ohex = Convert.ToHexString(ours.AsSpan((int)o+b,Math.Min(8,(int)(0xA8-b))));
+                string rhex = Convert.ToHexString(orbis.AsSpan((int)o+b,Math.Min(8,(int)(0xA8-b))));
+                if (ohex!=rhex) h.WriteLine($"    +{b:X2}: ours={ohex} orbis={rhex}");
+            }
+        }
+    }
+
+    // --- Dirent blocks: superroot (ino0.db0), uroot (ino2.db0) ---
+    h.WriteLine("\n=== DIRENT BLOCKS ===");
+    void DumpDirents(byte[] pfs, string label, int blockNum) {
+        h.WriteLine($"\n  --- {label} (block {blockNum}) ---");
+        int bOff = blockNum * 0x10000;
+        if (bOff + 0x10000 > pfs.Length) return;
+        int off = 0;
+        while (off + 16 <= 0x10000) {
+            uint ino = BitConverter.ToUInt32(pfs, bOff+off);
+            int type = BitConverter.ToInt32(pfs, bOff+off+4);
+            int nlen = BitConverter.ToInt32(pfs, bOff+off+8);
+            int esiz = BitConverter.ToInt32(pfs, bOff+off+12);
+            if (esiz < 16 || ino == 0 && type == 0) break;
+            string name = System.Text.Encoding.ASCII.GetString(pfs, bOff+off+16, Math.Min(nlen, esiz-16)).TrimEnd('\0');
+            h.WriteLine($"    +{off:X4}: ino={ino} type={type} nlen={nlen} esiz={esiz} name=[{name}]");
+            if (esiz <= 0) break;
+            off += esiz;
+            if (off >= 0x10000) break;
+        }
+    }
+    // Find inode2's db0 block for uroot in our PFS (inode 0=superroot at 0, 1=FPT at 1, 2=uroot at 2)
+    int GetDb0(byte[] pfs, int inoIdx) { return BitConverter.ToInt32(pfs, (int)(0x10000 + inoIdx*0xA8 + 88)); }
+    DumpDirents(ours, "OUR superroot", GetDb0(ours, 0));
+    DumpDirents(ours, "OUR uroot", GetDb0(ours, 2));
+    DumpDirents(orbis, "ORB superroot", GetDb0(orbis, 0));
+    DumpDirents(orbis, "ORB uroot", GetDb0(orbis, 2));
+    // Also dump uroot raw bytes for orbis
+    int orbUroot = GetDb0(orbis, 2);
+    h.WriteLine($"\n  ORB uroot block {orbUroot} raw[0..127]:");
+    for (int i=0;i<128;i+=32) h.WriteLine($"    +{i:X2}: {Convert.ToHexString(orbis.AsSpan(orbUroot*0x10000+i,Math.Min(32,0x10000-i)))}");
+
+    // --- FPT ---
+    h.WriteLine("\n=== FLAT PATH TABLE (block 3) ===");
+    void DumpFpt(byte[] pfs, string label) {
+        h.WriteLine($"  {label}:");
+        // FPT is ino1's db0 block
+        int fptBlock = GetDb0(pfs, 1);
+        int fptOff = fptBlock * 0x10000;
+        if (fptOff + 64 > pfs.Length) return;
+        // FPT size from ino[1].size
+        long fptSize = BitConverter.ToInt64(pfs, (int)(0x10000 + 1*0xA8 + 8));
+        for (long i = 0; i < fptSize && i < 512; i += 8) {
+            uint hash = BitConverter.ToUInt32(pfs, fptOff+(int)i);
+            uint ino = BitConverter.ToUInt32(pfs, fptOff+(int)i+4);
+            h.WriteLine($"    [{i/8,2}] hash=0x{hash:X8} ino={ino}");
+        }
+    }
+    DumpFpt(ours, "OUR");
+    DumpFpt(orbis, "ORB");
+
+    // --- Block map ---
+    h.WriteLine("\n=== BLOCK MAP ===");
+    long ourNb = BitConverter.ToInt64(ours, 0x34);
+    long orbNb = BitConverter.ToInt64(orbis, 0x34);
+    h.WriteLine($"{"Block",6} {"OUR purpose",-30} {"ORB purpose",-30}");
+    for (int b = 0; b < Math.Max(ourNb, orbNb); b++) {
+        string ourUse = b switch { 0 => "Header", 1 => "Inodes", _ => "" };
+        string orbUse = b switch { 0 => "Header", 1 => "Inodes", _ => "" };
+        // Find which inode points to this block
+        for (int io=0; io<maxNd; io++) {
+            if (GetDb0(ours,io)==b && ourUse=="") ourUse=$"ino[{io}] data";
+            if (GetDb0(orbis,io)==b && orbUse=="") orbUse=$"ino[{io}] data";
+        }
+        if (ourUse=="") { bool allZ=true; for(int j=b*0x10000;j<Math.Min(ours.Length,(b+1)*0x10000);j++) if(ours[j]!=0){allZ=false;break;} ourUse=allZ?"empty":"?data"; }
+        if (orbUse=="") { bool allZ=true; for(int j=b*0x10000;j<Math.Min(orbis.Length,(b+1)*0x10000);j++) if(orbis[j]!=0){allZ=false;break;} orbUse=allZ?"empty":"?data"; }
+        h.WriteLine($"{b,6} {ourUse,-30} {orbUse,-30}");
+    }
+
+    // --- First byte diff ---
+    h.WriteLine("\n=== FIRST BYTE DIFFERENCE ===");
+    for (int i = 0; i < minLen; i++) {
+        if (ours[i] != orbis[i]) {
+            h.WriteLine($"  offset 0x{i:X} (block {i/0x10000}+{i%0x10000:X}): ours=0x{ours[i]:X2} orbis=0x{orbis[i]:X2}");
+            h.WriteLine($"  context ours[{-Math.Max(0,i-8)}..{i+16}]: {Convert.ToHexString(ours.AsSpan(Math.Max(0,i-8),Math.Min(32,ours.Length-Math.Max(0,i-8))))}");
+            h.WriteLine($"  context orbis[{-Math.Max(0,i-8)}..{i+16}]: {Convert.ToHexString(orbis.AsSpan(Math.Max(0,i-8),Math.Min(32,orbis.Length-Math.Max(0,i-8))))}");
+            break;
+        }
+    }
 }
 
 /// <summary>gengp4_app / gengp4_patch equivalent: generate a GP4 project from a folder.</summary>

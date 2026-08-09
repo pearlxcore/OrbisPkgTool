@@ -113,18 +113,20 @@ public static class PfsWriter
         WriteDirent(w, ref superPos, 2, PfsDirentType.Directory, "uroot");          // ino 2
 
         // ---- Block 3: flat path table (sorted by hash, 8 bytes/entry) ----
+        // Upper 4 bits of inode field = flags (0=file, 2=directory)
+        // Reader masks with 0x0FFFFFFF to get actual inode number.
         long fptPos = 3 * BlockSize;
-        var fptEntries = new List<(uint Hash, uint Ino)>();
+        var fptEntries = new List<(uint Hash, uint Value)>();
         foreach (var d in dirs)
-            fptEntries.Add((FptHash(FullPath(d)), d.Number));
+            fptEntries.Add((FptHash(FullPath(d)), d.Number | 0x20000000)); // flag 2 = directory
         foreach (var f in fileNodes)
-            fptEntries.Add((FptHash(FullPath(f)), f.Number));
+            fptEntries.Add((FptHash(FullPath(f)), f.Number)); // flag 0 = file
         fptEntries.Sort((a, b) => a.Hash.CompareTo(b.Hash));
-        foreach (var (hash, ino) in fptEntries)
+        foreach (var (hash, value) in fptEntries)
         {
             w.BaseStream.Position = fptPos;
             WriteLe(w, hash);
-            WriteLe(w, ino);
+            WriteLe(w, value);
             fptPos += 8;
         }
 
