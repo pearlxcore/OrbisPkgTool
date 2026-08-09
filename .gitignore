@@ -1,0 +1,13 @@
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+*.zip
+*.pkg
+.vs/
+*.user
+*.suo
+ghidra_12.1.2_PUBLIC/
+PS4_Fake_PKG_Tools_3.87_V7/
+LibOrbisPkg.v0.2/
