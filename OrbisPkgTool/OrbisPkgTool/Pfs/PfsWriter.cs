@@ -47,10 +47,10 @@ public static class PfsWriter
             dir.Files.Add(new FileNode { Name = parts[^1], Data = data, Parent = dir });
         }
 
-        // Inode numbering (orbis standard):
-        //   0 = null/reserved, 1 = superroot, 2 = uroot, 3 = fpt,
+        // Inode numbering (matches reader + outer PFS):
+        //   0 = superroot, 1 = flat_path_table, 2 = uroot,
         //   then subdirs, then files.
-        uint next = 4;
+        uint next = 3;
         var dirs = AllDirs(root).ToList();
         foreach (var d in dirs) d.Number = next++;
         var fileNodes = AllFiles(root).ToList();
@@ -76,25 +76,20 @@ public static class PfsWriter
         WritePfsHeader(w, PfsMode.UnknownFlagAlwaysSet, dinodeCount, ndblock, fileTime, seed: null);
 
         // ---- Block 1: inode table (D32, 0xA8 each) ----
-        // FPT covers ALL items (directories + files), 12 bytes per entry
-        long fptSize = (dirs.Count + fileNodes.Count) * 12;
+        // FPT records: 8 bytes each (uint32 hash + uint32 inode)
+        long fptSize = (dirs.Count + fileNodes.Count) * 8;
         long inodePos = BlockSize;
 
-        // Inode 0: null (reserved)
-        w.BaseStream.Position = inodePos;
-        w.Write(new byte[0xA8]); // zero-filled reserved inode
-        inodePos += 0xA8;
-
-        // Inode 1: superroot (directory, db[0] = block 2)
+        // Inode 0: superroot (directory, db[0] = block 2)
         WriteD32Inode(w, inodePos, 0x416D, 1, 0x00020010, BlockSize, 1, 2); inodePos += 0xA8;
+
+        // Inode 1: flat_path_table (regular file, db[0] = block 3)
+        WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, 1, 3); inodePos += 0xA8;
 
         // Inode 2: uroot (user root directory, db[0] = block 5)
         // nlink = 2 + subdirectory count (POSIX: self + parent + child_dirs)
         int urootNlink = 2 + root.Dirs.Count;
         WriteD32Inode(w, inodePos, 0x416D, (ushort)urootNlink, 0x00000010, BlockSize, 1, 5); inodePos += 0xA8;
-
-        // Inode 3: flat_path_table (regular file, db[0] = block 3)
-        WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, 1, 3); inodePos += 0xA8;
 
         // Remaining subdirectories
         foreach (var d in dirs)
@@ -114,33 +109,23 @@ public static class PfsWriter
 
         // ---- Block 2: superroot dirents (flat_path_table, uroot) ----
         long superPos = 2 * BlockSize;
-        WriteDirent(w, ref superPos, 3, PfsDirentType.File, "flat_path_table");    // ino 3
+        WriteDirent(w, ref superPos, 1, PfsDirentType.File, "flat_path_table");    // ino 1
         WriteDirent(w, ref superPos, 2, PfsDirentType.Directory, "uroot");          // ino 2
 
-        // ---- Block 3: flat path table (sorted by hash) ----
+        // ---- Block 3: flat path table (sorted by hash, 8 bytes/entry) ----
         long fptPos = 3 * BlockSize;
-        var fptEntries = new List<(uint Hash, uint Ino, ushort Flags)>();
-        // Add directory entries
+        var fptEntries = new List<(uint Hash, uint Ino)>();
         foreach (var d in dirs)
-        {
-            uint flags = d.Name.Equals("sce_sys", StringComparison.OrdinalIgnoreCase) ? 6u : 2u;
-            fptEntries.Add((FptHash(FullPath(d)), (uint)d.Number, (ushort)flags));
-        }
-        // Add file entries
+            fptEntries.Add((FptHash(FullPath(d)), d.Number));
         foreach (var f in fileNodes)
-        {
-            uint flags = f.Name.Equals("keystone", StringComparison.OrdinalIgnoreCase) ? 4u : 0u;
-            fptEntries.Add((FptHash(FullPath(f)), (uint)f.Number, (ushort)flags));
-        }
+            fptEntries.Add((FptHash(FullPath(f)), f.Number));
         fptEntries.Sort((a, b) => a.Hash.CompareTo(b.Hash));
-        foreach (var (hash, ino, flags) in fptEntries)
+        foreach (var (hash, ino) in fptEntries)
         {
             w.BaseStream.Position = fptPos;
-            WriteLe(w, hash);                    // 4 bytes: FNV-1a path hash
-            WriteLe(w, ino);                     // 4 bytes: inode number
-            WriteLe(w, (ushort)0);               // 2 bytes: padding/reserved
-            WriteLe(w, flags);                   // 2 bytes: flags
-            fptPos += 12;
+            WriteLe(w, hash);
+            WriteLe(w, ino);
+            fptPos += 8;
         }
 
         // ---- Block 4: empty (zeros, like real FPKGs) ----
@@ -385,8 +370,8 @@ public static class PfsWriter
         WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u);
         WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u);
         WriteLe(w, 0u); WriteLe(w, 0u);
-        // blocks = ndinodeblock (2 for inner to match real FPKG convention)
-        uint hdrBlocks = (uint)(seed == null ? 2 : 1);
+        // blocks = 1 (matches orbis inner PFS: exactly 1 inode-table block)
+        uint hdrBlocks = 1;
         WriteLe(w, hdrBlocks);             // blocks at offset 0xB0
         WriteLe(w, 0u);                    // padding at offset 0xB4
         // Header dinode db[0] points to the inode table (block 1).
