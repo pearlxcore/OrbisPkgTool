@@ -56,7 +56,7 @@ public static class PkgBuilder
         for (uint i = 0; i < 7; i++) dk[i] = PkgCrypto.DeriveKey(project.ContentId, passcode, i);
 
         var inner = PfsWriter.BuildInnerPfs(pfsFiles, 0);
-        var pfsc = PFSCWriter.Build(inner);
+        var pfsc = PFSCWriter.Build(inner, storeAllRaw: true);
         var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0);
 
         var pkg = Assemble(project, pfsFiles, outer, passcode, dk, inner.Length, sc0Files);
@@ -377,7 +377,10 @@ public static class PkgBuilder
         }
 
         // Assemble body
-        long pfsOffset = Math.Max((nextOffset + 0xFFFF) & ~0xFFFFL, 0x80000);
+        // orbis requires pfs_image_offset aligned to 0x80000 (LibOrbisPkg:
+        // body_size = Align(body_offset + bodySize, 0x80000) - body_offset).
+        // A misaligned offset makes orbis reject the whole PKG.
+        long pfsOffset = Math.Max((nextOffset + 0x7FFFFL) & ~0x7FFFFL, 0x80000);
         long rawSize = pfsOffset + outerPfs.Length;
         const long MinPkgSize = 0x100000;
         const long PkgAlign = 0x8000;

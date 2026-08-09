@@ -70,7 +70,10 @@ try
             RunInnerBlock(ParseOptions(cmdArgs, out _).Pkg, cmdArgs[^1]);
             break;
         case "pfsdump":
-            RunPfsDump(ParseOptions(cmdArgs, out _).Pkg);
+            if (cmdArgs.Length >= 3 && cmdArgs[1] == "--save-inner")
+                RunDumpInnerFile(cmdArgs[2], cmdArgs[3]); // pkgPath, outPath
+            else
+                RunPfsDump(ParseOptions(cmdArgs, out _).Pkg);
             break;
         case "resignpfs":
             RunResignPfs(ParseOptions(cmdArgs, out _).Pkg, cmdArgs.Length > 2 ? int.Parse(cmdArgs[^1]) : int.MaxValue);
@@ -103,6 +106,120 @@ try
         case "pfscompare":
         case "pfscmp":
             RunPfsCompare(cmdArgs[1..]);
+            break;
+        case "dumpinner":
+        case "innerdump":
+        case "extractinnerpfs":
+            RunDumpInner(cmdArgs[1..]);
+            break;
+        case "dumpinner2":
+            RunDumpInnerFile(cmdArgs[1], cmdArgs[2]);
+            break;
+        case "dumppfsc":
+            RunDumpPfsc(cmdArgs[1], cmdArgs[2]);
+            break;
+        case "xtsdump":
+            RunXtsDump(cmdArgs[1], cmdArgs[2]);
+            break;
+        case "deftest":
+        {
+            byte[] data = File.ReadAllBytes(cmdArgs[1]);
+            // block 0: table[0]=0x10000, table[1] → read from header
+            long t0 = (long)BitConverter.ToUInt64(data, 1024);
+            long t1 = (long)BitConverter.ToUInt64(data, 1024 + 8);
+            Console.WriteLine($"block0: off=0x{t0:X} size={t1 - t0}");
+            byte[] blk = data[(int)t0..(int)t1];
+            // try full raw deflate
+            try {
+                using var ms = new MemoryStream(blk);
+                using var d = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionMode.Decompress);
+                var out1 = new MemoryStream(); d.CopyTo(out1);
+                Console.WriteLine($"FULL raw deflate: {out1.Length} bytes, head={Convert.ToHexString(out1.ToArray().AsSpan(0,16))}");
+            } catch (Exception e) { Console.WriteLine($"FULL raw deflate FAILED: {e.Message}"); }
+            // try skip-2 raw deflate
+            try {
+                using var ms = new MemoryStream(blk, 2, blk.Length - 2);
+                using var d = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionMode.Decompress);
+                var out1 = new MemoryStream(); d.CopyTo(out1);
+                Console.WriteLine($"SKIP2 raw deflate: {out1.Length} bytes, head={Convert.ToHexString(out1.ToArray().AsSpan(0,16))}");
+            } catch (Exception e) { Console.WriteLine($"SKIP2 raw deflate FAILED: {e.Message}"); }
+            break;
+        }
+        case "inflatecheck":
+        {
+            byte[] data = File.ReadAllBytes(cmdArgs[1]);
+            long t0 = (long)BitConverter.ToUInt64(data, 1024);
+            long t1 = (long)BitConverter.ToUInt64(data, 1024 + 8);
+            byte[] blk = data[(int)t0..(int)t1];
+            Console.WriteLine($"block0: {blk.Length} bytes, head={Convert.ToHexString(blk.AsSpan(0, Math.Min(16, blk.Length)))}");
+            // skip 2, inflate with SharpZipLib
+            try {
+                var inflater = new ICSharpCode.SharpZipLib.Zip.Compression.Inflater();
+                inflater.SetInput(blk, 2, blk.Length - 2);
+                var out1 = new byte[65536];
+                int n = inflater.Inflate(out1);
+                Console.WriteLine($"SharpZipLib Inflater (skip2): {n} bytes, finished={inflater.IsFinished}, head={Convert.ToHexString(out1.AsSpan(0,16))}");
+            } catch (Exception e) { Console.WriteLine($"SharpZipLib Inflater FAILED: {e.Message}"); }
+            // full inflate
+            try {
+                var inflater = new ICSharpCode.SharpZipLib.Zip.Compression.Inflater();
+                inflater.SetInput(blk, 0, blk.Length);
+                var out1 = new byte[65536];
+                int n = inflater.Inflate(out1);
+                Console.WriteLine($"SharpZipLib Inflater (full): {n} bytes, finished={inflater.IsFinished}, head={Convert.ToHexString(out1.AsSpan(0,16))}");
+                // save decoded output
+                File.WriteAllBytes(cmdArgs.Length > 2 ? cmdArgs[2] : cmdArgs[1] + ".dec", out1.AsSpan(0, n).ToArray());
+            } catch (Exception e) { Console.WriteLine($"SharpZipLib Inflater (full) FAILED: {e.Message}"); }
+            break;
+        }
+        case "leveltest":
+        {
+            byte[] inner = File.ReadAllBytes(cmdArgs[1]);
+            byte[] block0 = inner.AsSpan(0, 0x10000).ToArray();
+            byte[] orbisBlock = File.ReadAllBytes(cmdArgs[2]); // full orbis pfsc
+            long t0 = (long)BitConverter.ToUInt64(orbisBlock, 1024);
+            long t1 = (long)BitConverter.ToUInt64(orbisBlock, 1024 + 8);
+            byte[] orb = orbisBlock[(int)t0..(int)t1];
+            Console.WriteLine($"orbis block0: {orb.Length} bytes: {Convert.ToHexString(orb.AsSpan(0,24))}");
+            for (int lvl = 0; lvl <= 9; lvl++)
+            {
+                var d = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(lvl, noZlibHeaderOrFooter: true);
+                d.SetInput(block0); d.Finish();
+                var buf = new byte[0x10000]; var ms = new MemoryStream();
+                int n; while ((n = d.Deflate(buf)) > 0) ms.Write(buf, 0, n);
+                var c = ms.ToArray();
+                Console.WriteLine($"lvl {lvl}: {c.Length} bytes: {Convert.ToHexString(c.AsSpan(0, Math.Min(24, c.Length)))}");
+            }
+            break;
+        }
+        case "blkcount":
+        {
+            var reader = new PkgReader(cmdArgs[1], "00000000000000000000000000000000");
+            _ = reader.ListFiles();
+            var outer = reader.GetOuterPfs()!;
+            var f = outer.FindFile("pfs_image.dat")!;
+            // Count blocks the reader can enumerate
+            Console.WriteLine($"file size: {f.Size}, blocks reported: {f.Blocks}");
+            // Read through the file
+            using var s = outer.OpenFileStream(f);
+            byte[] buf = new byte[65536];
+            long total = 0; int ok = 0, fail = 0;
+            for (long b = 0; b < f.Blocks; b++)
+            {
+                s.Position = b * 65536;
+                try { int n = s.Read(buf, 0, 65536); if (n > 0) ok++; else fail++; total += n; }
+                catch (Exception e) { Console.WriteLine($"  FAIL block {b}: {e.Message}"); fail++; break; }
+            }
+            Console.WriteLine($"read ok={ok} fail={fail} total={total}");
+            break;
+        }
+        case "hashtest":
+            foreach (var p in new[] { "/a.bin", "uroot/a.bin", "/dir/c.bin", "uroot/dir/c.bin", "/sce_sys/keystone", "uroot/sce_sys/keystone", "/orbis.gp4", "uroot/orbis.gp4", "/dir", "uroot/dir", "/sce_sys", "uroot/sce_sys" })
+            {
+                uint h = 0;
+                foreach (var c in p) h = (uint)char.ToUpper(c) + 31 * h;
+                Console.WriteLine($"hash({p}) = 0x{h:X8}");
+            }
             break;
         case "trp":
             RunTrp(cmdArgs[1..]);
@@ -556,12 +673,12 @@ static void RunPfsCompare(string[] args)
     // --- Header fields (LE) ---
     h.WriteLine("=== PFS HEADER ===");
     (string, int, int)[] hdrFields = {
-        ("version", 0x00, 8), ("magic", 0x08, 4), ("id", 0x0C, 8),
-        ("fmode", 0x14, 1), ("clean", 0x15, 1), ("ro", 0x16, 1), ("rsv", 0x17, 1),
-        ("mode", 0x18, 2), ("unk1", 0x1A, 2), ("blocksz", 0x1C, 4),
-        ("nbackup", 0x20, 4), ("nblock", 0x24, 8), ("ndinode", 0x2C, 8),
-        ("ndblock", 0x34, 8), ("ndinodeblock", 0x3C, 8),
-        ("superroot_ino", 0x44, 8), ("seed", 0x370, 16)
+        ("version", 0x00, 8), ("magic", 0x08, 4), ("id", 0x0C, 4),
+        ("fmode", 0x10, 1), ("clean", 0x11, 1), ("ro", 0x12, 1), ("rsv", 0x13, 1),
+        ("mode", 0x1C, 2), ("unk1", 0x1E, 2), ("blocksz", 0x20, 4),
+        ("nbackup", 0x24, 4), ("nblock", 0x28, 8), ("ndinode", 0x30, 8),
+        ("ndblock", 0x38, 8), ("ndinodeblock", 0x40, 8),
+        ("superroot_ino", 0x48, 8), ("seed", 0x370, 16)
     };
     h.WriteLine($"{"Field",-20} {"Ours",-22} {"Orbis",-22} Match");
     foreach (var (name, off, sz) in hdrFields)
@@ -575,8 +692,8 @@ static void RunPfsCompare(string[] args)
     // --- Inode table (block 1, D32: 0xA8 each) ---
     h.WriteLine("\n=== INODE TABLE (D32, 0xA8 each, block 1 at offset 0x10000) ===");
     long inoOff = 0x10000;
-    long ourNd = BitConverter.ToInt64(ours, 0x2C);
-    long orbNd = BitConverter.ToInt64(orbis, 0x2C);
+    long ourNd = BitConverter.ToInt64(ours, 0x30);
+    long orbNd = BitConverter.ToInt64(orbis, 0x30);
     long maxNd = Math.Min(ourNd, orbNd);
     for (long i = 0; i < maxNd; i++)
     {
@@ -588,8 +705,8 @@ static void RunPfsCompare(string[] args)
         ushort onk = BitConverter.ToUInt16(ours,(int)o+2), rnk = BitConverter.ToUInt16(orbis,(int)o+2);
         uint ofl = BitConverter.ToUInt32(ours,(int)o+4), rfl = BitConverter.ToUInt32(orbis,(int)o+4);
         long osz = BitConverter.ToInt64(ours,(int)o+8), rsz = BitConverter.ToInt64(orbis,(int)o+8);
-        uint obl = BitConverter.ToUInt32(ours,(int)o+84), rbl = BitConverter.ToUInt32(orbis,(int)o+84);
-        int odb0 = BitConverter.ToInt32(ours,(int)o+88), rdb0 = BitConverter.ToInt32(orbis,(int)o+88);
+        uint obl = BitConverter.ToUInt32(ours,(int)o+0x60), rbl = BitConverter.ToUInt32(orbis,(int)o+0x60);
+        int odb0 = BitConverter.ToInt32(ours,(int)o+0x64), rdb0 = BitConverter.ToInt32(orbis,(int)o+0x64);
         h.WriteLine($"  {"mode",-14} 0x{om:X4},22 0x{rm:X4},22 {(om==rm?"SAME":"DIFF")}");
         h.WriteLine($"  {"nlink",-14} {onk,22} {rnk,22} {(onk==rnk?"SAME":"DIFF")}");
         h.WriteLine($"  {"flags",-14} 0x{ofl:X8},22 0x{rfl:X8},22 {(ofl==rfl?"SAME":"DIFF")}");
@@ -629,7 +746,7 @@ static void RunPfsCompare(string[] args)
         }
     }
     // Find inode2's db0 block for uroot in our PFS (inode 0=superroot at 0, 1=FPT at 1, 2=uroot at 2)
-    int GetDb0(byte[] pfs, int inoIdx) { return BitConverter.ToInt32(pfs, (int)(0x10000 + inoIdx*0xA8 + 88)); }
+    int GetDb0(byte[] pfs, int inoIdx) { return BitConverter.ToInt32(pfs, (int)(0x10000 + inoIdx*0xA8 + 0x64)); }
     DumpDirents(ours, "OUR superroot", GetDb0(ours, 0));
     DumpDirents(ours, "OUR uroot", GetDb0(ours, 2));
     DumpDirents(orbis, "ORB superroot", GetDb0(orbis, 0));
@@ -660,19 +777,18 @@ static void RunPfsCompare(string[] args)
 
     // --- Block map ---
     h.WriteLine("\n=== BLOCK MAP ===");
-    long ourNb = BitConverter.ToInt64(ours, 0x34);
-    long orbNb = BitConverter.ToInt64(orbis, 0x34);
+    long ourNb = BitConverter.ToInt64(ours, 0x38); // ndblock at 0x38
+    long orbNb = BitConverter.ToInt64(orbis, 0x38);
     h.WriteLine($"{"Block",6} {"OUR purpose",-30} {"ORB purpose",-30}");
-    for (int b = 0; b < Math.Max(ourNb, orbNb); b++) {
+    for (long b = 0; b < Math.Max(ourNb, orbNb); b++) {
         string ourUse = b switch { 0 => "Header", 1 => "Inodes", _ => "" };
         string orbUse = b switch { 0 => "Header", 1 => "Inodes", _ => "" };
-        // Find which inode points to this block
         for (int io=0; io<maxNd; io++) {
             if (GetDb0(ours,io)==b && ourUse=="") ourUse=$"ino[{io}] data";
             if (GetDb0(orbis,io)==b && orbUse=="") orbUse=$"ino[{io}] data";
         }
-        if (ourUse=="") { bool allZ=true; for(int j=b*0x10000;j<Math.Min(ours.Length,(b+1)*0x10000);j++) if(ours[j]!=0){allZ=false;break;} ourUse=allZ?"empty":"?data"; }
-        if (orbUse=="") { bool allZ=true; for(int j=b*0x10000;j<Math.Min(orbis.Length,(b+1)*0x10000);j++) if(orbis[j]!=0){allZ=false;break;} orbUse=allZ?"empty":"?data"; }
+        if (ourUse=="") { bool allZ=true; for(long j=b*0x10000;j<Math.Min(ours.Length,(b+1)*0x10000);j++) if(ours[j]!=0){allZ=false;break;} ourUse=allZ?"empty":"?data"; }
+        if (orbUse=="") { bool allZ=true; for(long j=b*0x10000;j<Math.Min(orbis.Length,(b+1)*0x10000);j++) if(orbis[j]!=0){allZ=false;break;} orbUse=allZ?"empty":"?data"; }
         h.WriteLine($"{b,6} {ourUse,-30} {orbUse,-30}");
     }
 
@@ -686,6 +802,13 @@ static void RunPfsCompare(string[] args)
             break;
         }
     }
+}
+
+/// <summary>Extracts the raw decompressed inner PFS from a PKG (uses PkgReader.ExtractRawInnerPfs).</summary>
+static void RunDumpInner(string[] args)
+{
+    if (args.Length < 2) { Console.Error.WriteLine("usage: dumpinner <pkg> <output.pfs>"); return; }
+    RunDumpInnerFile(args[0], args[1]);
 }
 
 /// <summary>gengp4_app / gengp4_patch equivalent: generate a GP4 project from a folder.</summary>
@@ -1022,9 +1145,46 @@ static void RunBuildTest(string[] args)
     }
     byte[] payload = File.ReadAllBytes(args[2]);
 
-    // Simple test: build PKG with the given PFS blob + our header assembly.
-    OrbisPkgTool.Pkg.PkgBuilder.BuildCs(args[0], args[1], args[3], payload, "00000000000000000000000000000000");
-    Console.WriteLine($"Built {args[3]} with injected PFS ({payload.Length} bytes)");
+    // Detect payload type:
+    //  - mode 0x8 at 0x1C   → raw inner PFS → wrap with PFSC + outer (or raw)
+    //  - "PFSC" magic       → pfs_image.dat content → wrap with outer only
+    //  - otherwise          → full outer PFS blob → use directly
+    ushort mode = BitConverter.ToUInt16(payload, 0x1C); // mode at 0x1C (per pfsdump)
+    bool isPfsc = payload.Length >= 4 && payload[0]=='P' && payload[1]=='F' && payload[2]=='S' && payload[3]=='C';
+    var project = OrbisPkgTool.Gp4.Gp4Project.Parse(File.ReadAllText(args[0]));
+    if (isPfsc)
+    {
+        // pfs_image.dat content (already PFSC) → wrap with our outer PFS
+        var dk = new byte[7][];
+        for (uint i = 0; i < 7; i++)
+            dk[i] = OrbisPkgTool.Crypto.PkgCrypto.DeriveKey(project.ContentId, "00000000000000000000000000000000", i);
+        var outer = OrbisPkgTool.Pfs.PfsWriter.BuildOuterPfs(payload, "pfs_image.dat", dk[1], OrbisPkgTool.Crypto.Keys.FakeKeySeed, 0);
+        OrbisPkgTool.Pkg.PkgBuilder.BuildCs(args[0], args[1], args[3], outer, "00000000000000000000000000000000");
+        Console.WriteLine($"Built {args[3]} with PFSC content ({payload.Length} bytes) + outer {outer.Length}");
+        return;
+    }
+    bool rawInner = args.Length >= 5 && args[4] == "--raw";
+    if (mode == 0x8)
+    {
+        // payload is a raw inner PFS → wrap with PFSC + outer PFS
+        var dk = new byte[7][];
+        for (uint i = 0; i < 7; i++)
+            dk[i] = OrbisPkgTool.Crypto.PkgCrypto.DeriveKey(project.ContentId, "00000000000000000000000000000000", i);
+        byte[] innerForOuter;
+        if (rawInner)
+            innerForOuter = payload; // pfs_image.dat = raw inner PFS (no PFSC)
+        else
+            innerForOuter = OrbisPkgTool.Pfs.PFSCWriter.Build(payload, storeAllRaw: args.Length >= 5 && args[4] == "--rawall");
+        var outer = OrbisPkgTool.Pfs.PfsWriter.BuildOuterPfs(innerForOuter, "pfs_image.dat", dk[1], OrbisPkgTool.Crypto.Keys.FakeKeySeed, 0);
+        OrbisPkgTool.Pkg.PkgBuilder.BuildCs(args[0], args[1], args[3], outer, "00000000000000000000000000000000");
+        Console.WriteLine($"Built {args[3]} with inner PFS {(rawInner ? "RAW" : "PFSC")} ({innerForOuter.Length} bytes) + outer {outer.Length}");
+    }
+    else
+    {
+        // Simple test: build PKG with the given outer PFS blob + our header assembly.
+        OrbisPkgTool.Pkg.PkgBuilder.BuildCs(args[0], args[1], args[3], payload, "00000000000000000000000000000000");
+        Console.WriteLine($"Built {args[3]} with injected outer PFS ({payload.Length} bytes)");
+    }
 }
 
 /// <summary>Recomputes all PFS block signatures of an existing PKG in place (block-wise, for large PFSes).</summary>
@@ -1139,6 +1299,61 @@ static void RunPfsDump(string pkgPath)
     var inner = reader.InnerPfs;
     if (inner != null)
         Console.WriteLine("inner opened OK");
+}
+
+/// <summary>Saves the raw decompressed inner PFS from a PKG.</summary>
+static void RunDumpInnerFile(string pkgPath, string outPath)
+{
+    using var reader = new PkgReader(pkgPath);
+    reader.ExtractRawInnerPfs(outPath);
+    var bytes = File.ReadAllBytes(outPath);
+    Console.WriteLine($"Inner PFS saved: {outPath} ({bytes.Length} bytes, {bytes.Length/0x10000} blocks)");
+    Console.WriteLine($"SHA256: {Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))}");
+    Console.WriteLine($"First 16: {Convert.ToHexString(bytes.AsSpan(0, Math.Min(16, bytes.Length)))}");
+    Console.WriteLine($"ndinode={BitConverter.ToInt64(bytes,0x2C)} ndblock={BitConverter.ToInt64(bytes,0x34)}");
+}
+
+/// <summary>Extracts the raw PFSC-compressed pfs_image.dat from a PKG.</summary>
+static void RunDumpPfsc(string pkgPath, string outPath)
+{
+    using var reader = new PkgReader(pkgPath, "00000000000000000000000000000000");
+    _ = reader.InnerPfs; // ensure EKPFS
+    var outer = reader.GetOuterPfs() ?? throw new Exception("no outer pfs");
+    var f = outer.FindFile("pfs_image.dat") ?? throw new Exception("no pfs_image.dat");
+    using var raw = outer.OpenFileStream(f);
+    using var ofs = File.Create(outPath);
+    raw.CopyTo(ofs);
+    Console.WriteLine($"PFSC saved: {outPath} ({raw.Length} bytes)");
+    // header fields
+    var hb = new byte[0x30]; raw.Position = 0; raw.Read(hb, 0, 0x30);
+    Console.WriteLine($"magic={System.Text.Encoding.ASCII.GetString(hb,0,4)} unk4={BitConverter.ToUInt32(hb,4)} unk8={BitConverter.ToUInt32(hb,8)} blockSz={BitConverter.ToUInt32(hb,0xC)} blockSz2={BitConverter.ToUInt64(hb,0x10)} tableOff={BitConverter.ToUInt64(hb,0x18)} dataOff={BitConverter.ToUInt64(hb,0x20)} rounded={BitConverter.ToUInt64(hb,0x28)}");
+}
+
+/// <summary>Decrypts ALL outer PFS blocks (XTS) and writes plaintext to a file.</summary>
+static void RunXtsDump(string pkgPath, string outPath)
+{
+    using var reader = new PkgReader(pkgPath, "00000000000000000000000000000000");
+    _ = reader.ListFiles(); // triggers EKPFS decrypt
+    var h = reader.Header;
+    long pfs = (long)h.PfsImageOffset;
+    long nb = (long)h.PfsImageSize / 0x10000;
+    byte[] seed = ReadAt(pkgPath, pfs + 0x370, 16);
+    byte[] ekpfs = reader.Ekpfs ?? throw new Exception("no ekpfs");
+    var (tk, dk) = OrbisPkgTool.Pfs.PfsReader.DeriveXtsKeys(
+        new OrbisPkgTool.Pfs.PfsHeader { Mode = OrbisPkgTool.Pfs.PfsMode.Signed | OrbisPkgTool.Pfs.PfsMode.Encrypted | OrbisPkgTool.Pfs.PfsMode.UnknownFlagAlwaysSet, Seed = seed },
+        ekpfs);
+    using var ofs = File.Create(outPath);
+    for (long b = 0; b < nb; b++)
+    {
+        byte[] block = ReadAt(pkgPath, pfs + b * 0x10000, 0x10000);
+        // Skip XTS decrypt for plaintext blocks (0 and 4)
+        bool plaintext = b == 0 || b == 4;
+        if (!plaintext)
+            for (int s = (int)(b * 16); s < (int)(b * 16) + 16; s++)
+                OrbisPkgTool.Pfs.PfsReader.XtsDecryptSector(block, (s - (int)(b * 16)) * 0x1000, (ulong)s, dk!, tk!);
+        ofs.Write(block);
+    }
+    Console.WriteLine($"Decrypted outer PFS written: {outPath} ({nb} blocks, {nb*0x10000} bytes)");
 }
 
 /// <summary>Dumps the inner PFS's flat path table as (hash, ino) pairs (diagnostic).</summary>

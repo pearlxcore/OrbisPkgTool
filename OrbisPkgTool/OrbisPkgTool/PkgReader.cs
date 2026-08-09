@@ -293,8 +293,10 @@ public sealed class PkgReader : IDisposable
         return result;
     }
 
-    private static void WalkPfsTree(PfsReader pfs, PfsInode dir, string prefix, List<PkgFileEntry> result)
+    private static void WalkPfsTree(PfsReader pfs, PfsInode dir, string prefix, List<PkgFileEntry> result,
+        HashSet<uint>? visited = null)
     {
+        visited ??= [];
         foreach (var d in pfs.ReadDirents(dir))
         {
             if (d.Name is "." or ".." or "flat_path_table")
@@ -306,6 +308,9 @@ public sealed class PkgReader : IDisposable
             string path = prefix.Length == 0 ? d.Name : prefix + "/" + d.Name;
             if (ino.IsDirectory)
             {
+                // Cycle protection: skip if already visited on this branch
+                if (!visited.Add(d.InodeNumber))
+                    continue;
                 result.Add(new PkgFileEntry
                 {
                     Path = "Image0/" + path,
@@ -313,7 +318,8 @@ public sealed class PkgReader : IDisposable
                     IsDirectory = true,
                     IsEncrypted = false,
                 });
-                WalkPfsTree(pfs, ino, path, result);
+                WalkPfsTree(pfs, ino, path, result, visited);
+                visited.Remove(d.InodeNumber);
             }
             else
             {
@@ -555,13 +561,22 @@ public sealed class PkgReader : IDisposable
     // Image0 layer (inner PFS)
     // ------------------------------------------------------------------
 
-    private PfsReader? OpenInnerPfs()
+    /// <summary>Returns the outer PFS reader (for diagnostic tools like dumpinner).</summary>
+    public PfsReader? GetOuterPfs()
     {
-        if (_innerPfs != null)
-            return _innerPfs;
+        // Ensure EKPFS is decrypted first
+        OpenInnerPfs();
+        if (_header.PfsImageOffset > 0 && _header.PfsImageOffset + _header.PfsImageSize <= (ulong)_stream.Length)
+        {
+            try { return PfsReader.Open(_reader, (long)_header.PfsImageOffset, _ekpfs); }
+            catch { return null; }
+        }
+        return null;
+    }
 
-        // EKPFS chain: AES-decrypt IMAGE_KEY with (image_key meta || dk3),
-        // then RSA-decrypt with the fake keyset.
+    /// <summary>Decrypts EKPFS from IMAGE_KEY if not already done.</summary>
+    private void EnsureEkpfs()
+    {
         var imageKeyEntry = _entries.FirstOrDefault(e => e.Id == PkgEntryIds.ImageKey);
         if (imageKeyEntry != null && _ekpfs == null)
         {
@@ -575,6 +590,52 @@ public sealed class PkgReader : IDisposable
         {
             EkpfsStatus = "no IMAGE_KEY entry in PKG";
         }
+    }
+
+    /// <summary>
+    /// Copies the raw decompressed inner PFS (starting with the PFS header, NOT "PFSC")
+    /// to the given destination stream. Reuses the exact chain from OpenInnerPfs().
+    /// </summary>
+    public void CopyRawInnerPfsTo(Stream destination)
+    {
+        EnsureEkpfs();
+        if (_header.PfsImageOffset == 0 || _ekpfs == null)
+            throw new InvalidOperationException($"Cannot open inner PFS (offset={_header.PfsImageOffset}, ekpfs={_ekpfs != null})");
+
+        var outer = PfsReader.Open(_reader, (long)_header.PfsImageOffset, _ekpfs);
+        var innerFile = FindPfsFile(outer, "pfs_image.dat")
+            ?? throw new InvalidOperationException("pfs_image.dat not found in outer PFS");
+        Stream innerStream = outer.OpenFileStream(innerFile);
+
+        // pfs_image.dat is a PFSC-compressed image; unwrap it.
+        var probe = new byte[4];
+        innerStream.Position = 0;
+        if (innerStream.Read(probe, 0, 4) == 4 &&
+            probe[0] == (byte)'P' && probe[1] == (byte)'F' &&
+            probe[2] == (byte)'S' && probe[3] == (byte)'C')
+        {
+            innerStream = new PFSCStream(innerStream);
+        }
+        else
+        {
+            innerStream.Position = 0;
+        }
+        innerStream.CopyTo(destination);
+    }
+
+    /// <summary>Saves the raw decompressed inner PFS to a file.</summary>
+    public void ExtractRawInnerPfs(string outputPath)
+    {
+        using var output = File.Create(outputPath);
+        CopyRawInnerPfsTo(output);
+    }
+
+    private PfsReader? OpenInnerPfs()
+    {
+        if (_innerPfs != null)
+            return _innerPfs;
+
+        EnsureEkpfs();
 
         // Outer PFS at header.pfs_image_offset contains pfs_image.dat = inner PFS.
         if (_header.PfsImageOffset > 0 && _header.PfsImageOffset + _header.PfsImageSize <= (ulong)_stream.Length)

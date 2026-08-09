@@ -87,8 +87,9 @@ public static class PfsWriter
         WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, 1, 3); inodePos += 0xA8;
 
         // Inode 2: uroot (user root directory, db[0] = block 5)
-        // nlink = 2 + subdirectory count (POSIX: self + parent + child_dirs)
-        int urootNlink = 2 + root.Dirs.Count;
+        // nlink = 3 + subdirectories (matches LibOrbisPkg: uroot starts at 3,
+        // +1 per subdir; verified against real orbis output)
+        int urootNlink = 3 + root.Dirs.Count;
         WriteD32Inode(w, inodePos, 0x416D, (ushort)urootNlink, 0x00000010, BlockSize, 1, 5); inodePos += 0xA8;
 
         // Remaining subdirectories
@@ -199,7 +200,10 @@ public static class PfsWriter
         WriteS32Inode(w, inode2, 0x416D, 3, 0x0000000C, BlockSize, BlockSize, 1, urootBlock, fileTime: fileTime);
         // pfs_image.dat: size = on-disk (PFSC) length; sizeUnc = the PFSC's
         // rounded decompressed size (real FPKGs: 7356526446 vs 11971723264).
-        long uncompressed = fileData.Length >= 0x30
+        // sizeUnc = decompressed size. For PFSC-wrapped inner PFS, read the
+        // PFSC rounded_file_size (offset 0x28); otherwise use the raw length.
+        bool isPfsc = fileData.Length >= 4 && fileData[0]=='P' && fileData[1]=='F' && fileData[2]=='S' && fileData[3]=='C';
+        long uncompressed = isPfsc && fileData.Length >= 0x30
             ? (long)BitConverter.ToUInt64(fileData, 0x28) // PFSC rounded_file_size
             : fileData.Length;
         WriteS32Inode(w, inode3, 0x816D, 1, 0x0000000D, fileData.Length, uncompressed,
@@ -247,9 +251,12 @@ public static class PfsWriter
             }
         }
 
-        // ---- uroot dirents: leave empty (orbis finds pfs_image.dat via FPT) ----
-        // Populated uroot fails orbis VFS parsing. Fix pending: dirent format detail.
-        // No functional impact — inner PFS uroot IS populated and works correctly.
+        // ---- uroot dirents: populated (matches real orbis output) ----
+        // Verified: orbis outer uroot contains ".", "..", "pfs_image.dat".
+        long urootPos = urootBlock * BlockSize;
+        WriteDirent(w, ref urootPos, 2, PfsDirentType.Dot, ".");
+        WriteDirent(w, ref urootPos, 2, PfsDirentType.DotDot, "..");
+        WriteDirent(w, ref urootPos, 3, PfsDirentType.File, fileName);
 
         // ---- data ----
         Buffer.BlockCopy(fileData, 0, image, (int)(dataStart * BlockSize), fileData.Length);
@@ -471,12 +478,16 @@ public static class PfsWriter
         ref long dataPos, long totalBlocks)
     {
         w.BaseStream.Position = pos;
-        for (int i = 0; i < 1820 && firstDataIndex + dataPos + i < totalBlocks; i++)
+        // Block numbers MUST match SignIndirectEntries: block = dataStart + firstDataIndex + i.
+        // (The old code wrote dataStart + dataPos, overlapping the direct blocks.)
+        int written = 0;
+        for (int i = 0; i < 1820 && firstDataIndex + i < totalBlocks; i++)
         {
             w.Write(new byte[32]);
-            WriteLe(w, (int)(dataStart + dataPos));
-            dataPos++;
+            WriteLe(w, (int)(dataStart + firstDataIndex + i));
+            written++;
         }
+        dataPos += written;
     }
 
     private static void WriteS32Pointer(BinaryWriter w, long pos, long block)

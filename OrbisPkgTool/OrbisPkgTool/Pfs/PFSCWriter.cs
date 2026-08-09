@@ -9,7 +9,7 @@ namespace OrbisPkgTool.Pfs;
 /// </summary>
 public static class PFSCWriter
 {
-    public static byte[] Build(byte[] pfsImage)
+    public static byte[] Build(byte[] pfsImage, bool storeAllRaw = false)
     {
         const int blockSize = 0x10000;
         int blockCount = (pfsImage.Length + blockSize - 1) / blockSize;
@@ -22,15 +22,57 @@ public static class PFSCWriter
         {
             int len = Math.Min(blockSize, pfsImage.Length - i * blockSize);
             using var z = new MemoryStream();
-            // Use zlib-wrapped deflate (RFC 1950). The PS4 PFSC decompressor
-            // skips a 2-byte zlib header before decompressing each block.
-            using (var zlib = new System.IO.Compression.ZLibStream(z, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
-                zlib.Write(pfsImage, i * blockSize, len);
+            // RAW deflate (no zlib wrapper). Verified against real orbis output:
+            // orbis PFSC blocks start with raw deflate (e.g. 0x48 0x89), NOT a
+            // zlib header (0x78 0x9C). LibOrbisPkg's reader skips 2 bytes then
+            // raw-deflates, which matches this format.
+            // Real orbis PFSC: blocks that don't compress (compressed size >=
+            // block size) are stored RAW (uncompressed, exactly blockSize bytes).
+            // Compressed blocks use zlib's raw deflate WITHOUT a zlib header —
+            // orbis output starts with BFINAL=0 dynamic-Huffman streams
+            // (first bytes 0x48 0x89 ...). .NET DeflateStream produces BFINAL=1
+            // streams that orbis's decoder rejects, so we use SharpZipLib's
+            // raw Deflater with the same zlib semantics.
+            if (storeAllRaw)
+            {
+                // Diagnostic: store every block raw (no compression).
+                compressedBlocks[i] = new byte[blockSize];
+                Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
+                dataSize += compressedBlocks[i].Length;
+                continue;
+            }
+            // Raw deflate (no zlib header), matching orbis PFSC block format.
+            // Level 6 = zlib default — verified byte-identical to orbis output
+            // (orbis blocks = 0x48 0x89 + level-6 raw deflate).
+            var deflater = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(6, noZlibHeaderOrFooter: true);
+            deflater.SetInput(pfsImage, i * blockSize, len);
+            deflater.Finish();
+            var compBuf = new byte[blockSize];
+            int n;
+            using (z)
+            {
+                while ((n = deflater.Deflate(compBuf)) > 0)
+                    z.Write(compBuf, 0, n);
+            }
             var comp = z.ToArray();
-            compressedBlocks[i] = comp;
-            dataSize += comp.Length;
+            if (comp.Length + 2 >= blockSize)
+            {
+                compressedBlocks[i] = new byte[blockSize];
+                Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
+            }
+            else
+            {
+                // 2-byte prefix (0x48 0x89) before the raw deflate, matching orbis.
+                compressedBlocks[i] = new byte[comp.Length + 2];
+                compressedBlocks[i][0] = 0x48; compressedBlocks[i][1] = 0x89;
+                Buffer.BlockCopy(comp, 0, compressedBlocks[i], 2, comp.Length);
+            }
+            dataSize += compressedBlocks[i].Length;
         }
-        int dataOffset = tableOffset + (blockCount + 1) * 8;
+        // Real orbis PFSC files use dataOffset = 0x10000 (block-aligned).
+        // LibOrbisPkg PFSCReader reads whatever DataStart says, but orbis
+        // itself may require block alignment here.
+        int dataOffset = 0x10000;
 
         using var ms = new MemoryStream();
         var w = new BinaryWriter(ms);
