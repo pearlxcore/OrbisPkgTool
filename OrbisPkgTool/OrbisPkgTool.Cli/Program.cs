@@ -113,6 +113,9 @@ try
         case "repack":
             RunRepack(cmdArgs[1..]);
             break;
+        case "shadps4diag":
+            RunShadPS4Diag(cmdArgs[1..]);
+            break;
         case "pfscompare":
         case "pfscmp":
             RunPfsCompare(cmdArgs[1..]);
@@ -959,6 +962,38 @@ static void RunRepack(string[] args)
 /// Compares two raw PFS images byte-by-byte for debugging compatibility.
 /// Usage: pfscompare <our.pfs> <orbis.pfs>
 /// </summary>
+/// <summary>
+/// ShadPS4 PKG reader diagnostic — mirrors shadPS4's exact PKG reading
+/// logic step by step to find where the installer crashes on rebuilt PKGs.
+/// Usage: shadps4diag <pkg> [--dump-dir <dir>]
+/// </summary>
+static void RunShadPS4Diag(string[] args)
+{
+    string? pkg = null, dumpDir = null;
+    string passcode = PkgBuilder.DefaultPasscode;
+    for (int i = 0; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--dump-dir" when i + 1 < args.Length: dumpDir = args[++i]; break;
+            case "--passcode" when i + 1 < args.Length: passcode = args[++i]; break;
+            default:
+                if (!args[i].StartsWith('-')) pkg = args[i];
+                break;
+        }
+    }
+    if (pkg == null || !File.Exists(pkg))
+    {
+        Console.Error.WriteLine("usage: shadps4diag <pkg> [--dump-dir <dir>] [--passcode X]");
+        Console.Error.WriteLine("  Mirrors shadPS4's PKG reading logic step-by-step.");
+        Console.Error.WriteLine("  Writes <pkg>.shadps4diag.log with the full trace.");
+        Console.Error.WriteLine("  With --dump-dir, also extracts files using shadPS4's logic.");
+        Environment.ExitCode = 2;
+        return;
+    }
+    Environment.ExitCode = ShadPS4Diag.Run(pkg, dumpDir, passcode);
+}
+
 static void RunPfsCompare(string[] args)
 {
     if (args.Length < 2) { Console.Error.WriteLine("usage: pfscompare <our.pfs> <orbis.pfs>"); return; }
