@@ -39,10 +39,21 @@ function Should-Run([string]$key) {
     return $Global:OnlySet.Count -eq 0 -or $Global:OnlySet.ContainsKey($key)
 }
 
-# disk preflight - realistic peak with per-phase cleanup (5x pkg sizes + slack)
-$est = 25.0
-foreach ($pkg in @($Run.OrigPkgSafe, $Run.OursPkgSafe)) {
-    if ($pkg -and (Test-Path $pkg)) { $est += (Get-Item $pkg).Length / 1GB * 5.0 }
+# disk preflight - phase-aware estimate.
+# Targeted runs peak at the single largest selected phase (per-phase cleanup
+# means phases do not accumulate); full runs need ~5x pkg sizes + slack.
+$perPhaseNeed = @{ A = 35.0; B = 35.0; C = 1.0; E = 35.0; F = 70.0; G = 12.0; H = 40.0; I = 40.0; J = 40.0; K = 40.0; L = 1.0; M = 25.0; N = 1.0 }
+if ($Global:OnlySet.Count -gt 0) {
+    $est = 10.0
+    foreach ($k in $Global:OnlySet.Keys) {
+        if ($perPhaseNeed.ContainsKey($k) -and $perPhaseNeed[$k] -gt $est) { $est = $perPhaseNeed[$k] }
+    }
+    $est += 10.0
+} else {
+    $est = 25.0
+    foreach ($pkg in @($Run.OrigPkgSafe, $Run.OursPkgSafe)) {
+        if ($pkg -and (Test-Path $pkg)) { $est += (Get-Item $pkg).Length / 1GB * 5.0 }
+    }
 }
 $drive = Get-PSDrive ([System.IO.Path]::GetPathRoot($Cfg.work_dir).TrimEnd('\')[0])
 $avail = [math]::Round($drive.Free / 1GB, 1)
