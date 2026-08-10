@@ -284,7 +284,9 @@ public sealed class PkgReader : IDisposable
         if (inner != null)
         {
             // Inner PFS root (uroot) contains the game tree.
-            var rootIno = inner.GetInode(2); // uroot
+            // (Inode 2 can be a collision_resolver when FPT hashes collide —
+            // then uroot is inode 3.)
+            var rootIno = inner.GetInode(inner.UrootInode);
             if (rootIno != null)
                 WalkPfsTree(inner, rootIno, "", result);
         }
@@ -690,7 +692,7 @@ public sealed class PkgReader : IDisposable
             }
         }
         // fallback: scan the uroot dirents
-        var root = pfs.GetInode(2);
+        var root = pfs.GetInode(pfs.UrootInode);
         if (root != null)
             foreach (var d in pfs.ReadDirents(root))
                 if (string.Equals(d.Name, name, StringComparison.OrdinalIgnoreCase) && d.InodeNumber < pfs.InodeCount)

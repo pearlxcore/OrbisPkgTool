@@ -16,8 +16,8 @@ namespace OrbisPkgTool.Pkg;
 public static class PkgBuilder
 {
     public const string DefaultPasscode = "00000000000000000000000000000000";
-    private const uint TableOffset = 0x2A80;
-    private const uint BodyOffset = 0x2000;
+    private const uint TableOffset = PfsFormat.PkgTableOffset;
+    private const uint BodyOffset = PfsFormat.PkgBodyOffset;
 
     /// <summary>
     /// Builds a PKG from a GP4 project + source folder.
@@ -230,13 +230,16 @@ public static class PkgBuilder
             Buffer.BlockCopy(hash, 0, digestBuf, i * 32, 32);
         }
 
-        long pfsOffset = Math.Max((nextOffset + 0x7FFFFL) & ~0x7FFFFL, 0x80000);
+        long pfsOffset = Math.Max((nextOffset + PfsFormat.PfsImageAlignment - 1) & ~(PfsFormat.PfsImageAlignment - 1), PfsFormat.PfsImageAlignment);
         long outerSize = new FileInfo(outerPfsPath).Length;
         long pkgSize = pfsOffset + outerSize;
         const long MinPkgSize = 0x100000;
         const long PkgAlign = 0x8000;
         if (pkgSize < MinPkgSize) pkgSize = MinPkgSize;
         if (pkgSize % PkgAlign != 0) pkgSize += PkgAlign - (pkgSize % PkgAlign);
+
+        // Fail fast on structural invariants before writing anything.
+        ValidateAssemblyInvariants(entries, pfsOffset, outerSize, pkgSize);
 
         using var pkg = new FileStream(outputPath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read);
         pkg.SetLength(pkgSize);
@@ -369,6 +372,33 @@ public static class PkgBuilder
         Buffer.BlockCopy(signature, 0, hdr, 0x1000, 256);
         pkg.Position = 0;
         pkg.Write(hdr, 0, 0x1100);
+    }
+
+    /// <summary>
+    /// Fail-fast compatibility invariants, checked before any output is written.
+    /// Every rule here is an orbis-pub-cmd 3.87 requirement (see PfsFormat.cs).
+    /// </summary>
+    private static void ValidateAssemblyInvariants(List<BuildEntry> entries, long pfsOffset, long outerSize, long pkgSize)
+    {
+        if (pfsOffset % PfsFormat.PfsImageAlignment != 0)
+            throw new InvalidOperationException(
+                $"pfs_image_offset 0x{pfsOffset:X} is not {PfsFormat.PfsImageAlignment:X}-aligned");
+        if (pfsOffset + outerSize > pkgSize)
+            throw new InvalidOperationException("PFS image range exceeds package size");
+
+        var ids = new HashSet<uint>();
+        foreach (var e in entries)
+        {
+            if (!ids.Add(e.Id))
+                throw new InvalidOperationException($"Duplicate entry ID 0x{e.Id:X8} in entry table");
+            long eEnd = (long)e.DataOffset + e.DataSize;
+            if (eEnd > pkgSize)
+                throw new InvalidOperationException(
+                    $"Entry 0x{e.Id:X8} range 0x{e.DataOffset:X}..0x{eEnd:X} outside package (size 0x{pkgSize:X})");
+            if (e.Encrypted && (e.DataSize & 15) != 0)
+                throw new InvalidOperationException(
+                    $"Entry 0x{e.Id:X8} encrypted stored size {e.DataSize} is not 16-aligned");
+        }
     }
 
     /// <summary>Builds the PKG entry list (shared with Assemble).</summary>
@@ -772,12 +802,15 @@ public static class PkgBuilder
         // orbis requires pfs_image_offset aligned to 0x80000 (LibOrbisPkg:
         // body_size = Align(body_offset + bodySize, 0x80000) - body_offset).
         // A misaligned offset makes orbis reject the whole PKG.
-        long pfsOffset = Math.Max((nextOffset + 0x7FFFFL) & ~0x7FFFFL, 0x80000);
+        long pfsOffset = Math.Max((nextOffset + PfsFormat.PfsImageAlignment - 1) & ~(PfsFormat.PfsImageAlignment - 1), PfsFormat.PfsImageAlignment);
         long rawSize = pfsOffset + outerPfs.Length;
         const long MinPkgSize = 0x100000;
         const long PkgAlign = 0x8000;
         if (rawSize < MinPkgSize) rawSize = MinPkgSize;
         if (rawSize % PkgAlign != 0) rawSize += PkgAlign - (rawSize % PkgAlign);
+
+        // Fail fast on structural invariants before writing anything.
+        ValidateAssemblyInvariants(entries, pfsOffset, outerPfs.Length, rawSize);
         var pkg = new byte[rawSize];
 
         foreach (var e in entries)

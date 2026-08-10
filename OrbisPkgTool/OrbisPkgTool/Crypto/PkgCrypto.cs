@@ -120,7 +120,8 @@ public static class PkgCrypto
         return header.Concat(fingerprint).Concat(final).ToArray();
     }
 
-    private static byte[] HmacSha256(byte[] key, byte[] data)
+    /// <summary>HMAC-SHA256 (outer-PFS block signatures, keystone MAC).</summary>
+    public static byte[] HmacSha256(byte[] key, byte[] data)
     {
         using var hmac = new HMACSHA256(key);
         return hmac.ComputeHash(data);

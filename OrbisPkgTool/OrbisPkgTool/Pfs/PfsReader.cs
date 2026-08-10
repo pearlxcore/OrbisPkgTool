@@ -34,10 +34,16 @@ public sealed class PfsReader
     public PfsInode? GetInode(uint number) =>
         number < _inodes.Length ? _inodes[number] : null;
 
+    /// <summary>
+    /// The uroot inode: 2 normally, or 3 when inode 2 is a collision_resolver
+    /// file (FPT hash-collision layout — OpenOrbis reference).
+    /// </summary>
+    public uint UrootInode => GetInode(2)?.IsDirectory == true ? 2u : 3u;
+
     /// <summary>Resolves a slash-separated path (e.g. "sce_sys/param.sfo") from the uroot inode.</summary>
     public PfsInode? FindFile(string path)
     {
-        var current = GetInode(2); // uroot
+        var current = GetInode(UrootInode);
         if (current == null) return null;
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         for (int i = 0; i < parts.Length; i++)

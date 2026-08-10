@@ -49,6 +49,12 @@ public sealed class PkgEntry
 
 /// <summary>
 /// Well-known entry IDs (as seen in the PKG entry table of official and fake PKGs).
+///
+/// AUTHORITATIVE SOURCE: the entry table of the original Digimon World FPKG
+/// (orbis-pub-cmd 3.87 output), read directly. Some values differ from the
+/// older psdevwiki listing (notably pic1.png = 0x1006, NOT 0x1241) — the
+/// orbis 3.87 empirical values win. Do not replace them with psdevwiki
+/// values without evidence.
 /// </summary>
 public static class PkgEntryIds
 {

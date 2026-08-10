@@ -11,8 +11,9 @@ namespace OrbisPkgTool.Pfs;
 /// </summary>
 public static class PfsWriter
 {
-    public const long BlockSize = 0x10000;
-    public const int XtsSectorSize = 0x1000;
+    // Central, origin-classified format constants — see PfsFormat.cs.
+    public const long BlockSize = PfsFormat.BlockSize;
+    public const int XtsSectorSize = PfsFormat.XtsSectorSize;
 
     // ------------------------------------------------------------------
     // Inner PFS (mode 0x8, D32 inodes) â€” the game filesystem
@@ -48,13 +49,22 @@ public static class PfsWriter
             dir.Files.Add(new FileNode { Name = parts[^1], Data = data, Parent = dir });
         }
 
-        // Inode numbering (matches reader + outer PFS):
-        //   0 = superroot, 1 = flat_path_table, 2 = uroot,
-        //   then subdirs, then files.
-        uint next = 3;
         var dirs = AllDirs(root).ToList();
-        foreach (var d in dirs) d.Number = next++;
         var fileNodes = AllFiles(root).ToList();
+
+        // FPT hash collision detection (before inode numbering — a collision
+        // shifts the layout by one structural inode, OpenOrbis reference).
+        var seen = new HashSet<uint>();
+        bool hasCollision = false;
+        foreach (var d in dirs) if (!seen.Add(FptHash(FullPath(d)))) hasCollision = true;
+        foreach (var f in fileNodes) if (!seen.Add(FptHash(FullPath(f)))) hasCollision = true;
+
+        // Inode numbering (matches reader + outer PFS):
+        //   0 = superroot, 1 = flat_path_table, [2 = collision_resolver],
+        //   then uroot, subdirs, files.  The resolver exists ONLY when a FPT
+        //   hash collision was found (OpenOrbis/LibOrbisPkg reference).
+        uint next = hasCollision ? 4u : 3u;
+        foreach (var d in dirs) d.Number = next++;
         foreach (var f in fileNodes) f.Number = next++;
         int dinodeCount = (int)next;
 
@@ -66,19 +76,20 @@ public static class PfsWriter
             long p = BlockSize;
             for (int i = 0; i < dinodeCount; i++)
             {
-                if (p % BlockSize > BlockSize - 0xA8) p += BlockSize - (p % BlockSize);
-                p += 0xA8;
+                if (p % BlockSize > BlockSize - PfsFormat.D32InodeSize) p += BlockSize - (p % BlockSize);
+                p += PfsFormat.D32InodeSize;
             }
             inodeBlocks = (p - BlockSize + BlockSize - 1) / BlockSize;
         }
 
         // Block layout (matches real orbis): 0=header, 1..N=inode table,
-        //   N+1=superroot dirents, N+2=fpt, N+3=empty, N+4=uroot dirents,
-        //   then dirs, then files.
+        //   N+1=superroot dirents, N+2=fpt, N+3=empty (or collision_resolver
+        //   when a hash collision exists — LibOrbisPkg reference), N+4=uroot
+        //   dirents, then dirs, then files.
         long superBlock = 1 + inodeBlocks;
         long fptBlock = superBlock + 1;
-        long emptyBlock = fptBlock + 1;
-        long urootBlock = emptyBlock + 1;
+        long crBlock = fptBlock + 1;       // empty block slot; resolver occupies it
+        long urootBlock = crBlock + 1;
         long nextBlock = urootBlock + 1;
         foreach (var d in dirs)
             d.DirentsBlock = nextBlock++;
@@ -88,6 +99,39 @@ public static class PfsWriter
             nextBlock += CeilDiv(f.Data.Length, (int)BlockSize);
         }
         long ndblock = nextBlock;
+
+        // Collision resolver layout: per collided hash (FPT sorted order), the
+        // dirents of its colliding nodes (full-path names), then 0x18 padding.
+        // FPT entries for collided hashes hold 0x80000000 | running byte offset
+        // into the resolver.
+        var colOffsets = new Dictionary<uint, long>();
+        long resolverSize = 0;
+        if (hasCollision)
+        {
+            var byHash = new SortedDictionary<uint, List<(bool IsDir, uint Ino, string Path)>>();
+            foreach (var d in dirs)
+            {
+                uint h = FptHash(FullPath(d));
+                if (!byHash.TryGetValue(h, out var list)) byHash[h] = list = [];
+                list.Add((true, d.Number, FullPath(d)));
+            }
+            foreach (var f in fileNodes)
+            {
+                uint h = FptHash(FullPath(f));
+                if (!byHash.TryGetValue(h, out var list)) byHash[h] = list = [];
+                list.Add((false, f.Number, FullPath(f)));
+            }
+            long off = 0;
+            foreach (var kv in byHash)
+            {
+                if (kv.Value.Count < 2) continue;
+                colOffsets[kv.Key] = off;
+                foreach (var (_, _, path) in kv.Value)
+                    off += DirentSize(path);
+                off += 0x18;
+            }
+            resolverSize = off;
+        }
 
         // Zero-fill the output up to the full image size (sparse support for files).
         output.SetLength(ndblock * BlockSize);
@@ -101,7 +145,7 @@ public static class PfsWriter
         // FPT records: 8 bytes each (uint32 hash + uint32 inode)
         long fptSize = (dirs.Count + fileNodes.Count) * 8;
         long inodePos = BlockSize;
-        void NextInode() { if (inodePos % BlockSize > BlockSize - 0xA8) inodePos += BlockSize - (inodePos % BlockSize); }
+        void NextInode() { if (inodePos % BlockSize > BlockSize - PfsFormat.D32InodeSize) inodePos += BlockSize - (inodePos % BlockSize); }
 
         // Inode 0: superroot (directory, db[0] = superroot block)
         NextInode();
@@ -111,7 +155,16 @@ public static class PfsWriter
         NextInode();
         WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, 1, fptBlock); inodePos += 0xA8;
 
-        // Inode 2: uroot (user root directory, db[0] = uroot block)
+        // Inode 2: collision_resolver (only when hasCollision)
+        if (hasCollision)
+        {
+            NextInode();
+            WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, resolverSize,
+                CeilDiv(resolverSize, (int)BlockSize), crBlock);
+            inodePos += 0xA8;
+        }
+
+        // uroot (user root directory, db[0] = uroot block)
         // nlink = 3 + subdirectories (matches LibOrbisPkg: uroot starts at 3,
         // +1 per subdir; verified against real orbis output)
         int urootNlink = 3 + root.Dirs.Count;
@@ -136,20 +189,28 @@ public static class PfsWriter
             inodePos += 0xA8;
         }
 
-        // ---- Superroot dirents (flat_path_table, uroot) ----
+        // ---- Superroot dirents (flat_path_table[, collision_resolver], uroot) ----
         long superPos = superBlock * BlockSize;
         WriteDirent(w, ref superPos, 1, PfsDirentType.File, "flat_path_table");    // ino 1
-        WriteDirent(w, ref superPos, 2, PfsDirentType.Directory, "uroot");          // ino 2
+        if (hasCollision)
+            WriteDirent(w, ref superPos, 2, PfsDirentType.File, "collision_resolver"); // ino 2
+        WriteDirent(w, ref superPos, hasCollision ? 3u : 2u, PfsDirentType.Directory, "uroot");
 
         // ---- Flat path table (sorted by hash, 8 bytes/entry) ----
-        // Upper 4 bits of inode field = flags (0=file, 2=directory)
-        // Reader masks with 0x0FFFFFFF to get actual inode number.
+        // Upper 4 bits of inode field = flags (0=file, 2=directory);
+        // collided hashes use 0x80000000 | resolver byte offset (OpenOrbis).
         long fptPos = fptBlock * BlockSize;
         var fptEntries = new List<(uint Hash, uint Value)>();
         foreach (var d in dirs)
-            fptEntries.Add((FptHash(FullPath(d)), d.Number | 0x20000000)); // flag 2 = directory
+        {
+            uint h = FptHash(FullPath(d));
+            fptEntries.Add((h, colOffsets.TryGetValue(h, out var off) ? 0x80000000u | (uint)off : d.Number | 0x20000000));
+        }
         foreach (var f in fileNodes)
-            fptEntries.Add((FptHash(FullPath(f)), f.Number)); // flag 0 = file
+        {
+            uint h = FptHash(FullPath(f));
+            fptEntries.Add((h, colOffsets.TryGetValue(h, out var off) ? 0x80000000u | (uint)off : f.Number));
+        }
         fptEntries.Sort((a, b) => a.Hash.CompareTo(b.Hash));
         foreach (var (hash, value) in fptEntries)
         {
@@ -159,7 +220,31 @@ public static class PfsWriter
             fptPos += 8;
         }
 
-        // ---- Block 4: empty (zeros, like real FPKGs) ----
+        // ---- Block: empty (no collision) or collision_resolver (collision) ----
+        if (hasCollision)
+        {
+            long crPos = crBlock * BlockSize;
+            var byHash = new SortedDictionary<uint, List<(bool IsDir, uint Ino, string Path)>>();
+            foreach (var d in dirs)
+            {
+                uint h = FptHash(FullPath(d));
+                if (!byHash.TryGetValue(h, out var list)) byHash[h] = list = [];
+                list.Add((true, d.Number, FullPath(d)));
+            }
+            foreach (var f in fileNodes)
+            {
+                uint h = FptHash(FullPath(f));
+                if (!byHash.TryGetValue(h, out var list)) byHash[h] = list = [];
+                list.Add((false, f.Number, FullPath(f)));
+            }
+            foreach (var kv in byHash)
+            {
+                if (kv.Value.Count < 2) continue;
+                foreach (var (isDir, ino, path) in kv.Value)
+                    WriteDirent(w, ref crPos, ino, isDir ? PfsDirentType.Directory : PfsDirentType.File, path);
+                crPos += 0x18;
+            }
+        }
 
         // ---- uroot dirents (populated, with . and .. like real inner FPKGs) ----
         long pos = urootBlock * BlockSize;
@@ -741,9 +826,7 @@ public static class PfsWriter
     private static void WriteDirent(BinaryWriter w, ref long pos, long ino, PfsDirentType type, string name)
     {
         w.BaseStream.Position = pos;
-        int entSize = name.Length + 17;
-        if (entSize % 8 != 0)
-            entSize += 8 - (entSize % 8);
+        int entSize = DirentSize(name);
         WriteLe(w, (uint)ino);
         WriteLe(w, (int)type);
         WriteLe(w, name.Length);
@@ -751,6 +834,15 @@ public static class PfsWriter
         w.Write(System.Text.Encoding.ASCII.GetBytes(name));
         // Note: name is NOT null-terminated (matches original orbis behavior)
         pos += entSize;
+    }
+
+    /// <summary>On-disk size of a dirent: 16-byte header + name + padding to 8.</summary>
+    private static int DirentSize(string name)
+    {
+        int entSize = name.Length + 17;
+        if (entSize % 8 != 0)
+            entSize += 8 - (entSize % 8);
+        return entSize;
     }
 
     /// <summary>

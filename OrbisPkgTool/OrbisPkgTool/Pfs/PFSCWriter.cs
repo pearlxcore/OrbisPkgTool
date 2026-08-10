@@ -16,13 +16,13 @@ public static class PFSCWriter
     /// <summary>Stream-based PFSC build for images that don't fit in memory.</summary>
     public static void BuildToStream(Stream pfsImage, Stream output, bool storeAllRaw = true)
     {
-        const int blockSize = 0x10000;
+        const int blockSize = (int)PfsFormat.BlockSize;
         long total = pfsImage.Length;
         int blockCount = (int)((total + blockSize - 1) / blockSize);
         ulong rounded = (ulong)((long)blockCount * blockSize);
 
-        int tableOffset = 0x400;
-        int dataOffset = 0x10000;
+        int tableOffset = PfsFormat.PfscTableOffset;
+        long dataOffset = PfsFormat.PfscDataOffset;
 
         // Header
         output.Position = 0;
@@ -124,11 +124,11 @@ public static class PFSCWriter
 
     public static byte[] Build(byte[] pfsImage, bool storeAllRaw = false)
     {
-        const int blockSize = 0x10000;
+        const int blockSize = (int)PfsFormat.BlockSize;
         int blockCount = (pfsImage.Length + blockSize - 1) / blockSize;
         ulong rounded = (ulong)((long)blockCount * blockSize);
 
-        int tableOffset = 0x400; // aligned like real FPKGs
+        int tableOffset = PfsFormat.PfscTableOffset; // aligned like real FPKGs
         var compressedBlocks = new byte[blockCount][];
         long dataSize = 0;
         for (int i = 0; i < blockCount; i++)
@@ -192,7 +192,7 @@ public static class PFSCWriter
         // Real orbis PFSC files use dataOffset = 0x10000 (block-aligned).
         // LibOrbisPkg PFSCReader reads whatever DataStart says, but orbis
         // itself may require block alignment here.
-        int dataOffset = 0x10000;
+        long dataOffset = PfsFormat.PfscDataOffset;
 
         using var ms = new MemoryStream();
         var w = new BinaryWriter(ms);

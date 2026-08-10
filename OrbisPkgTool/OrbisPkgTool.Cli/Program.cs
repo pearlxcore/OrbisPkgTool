@@ -54,6 +54,10 @@ try
         case "verify":
             RunVerify(ParseOptions(cmdArgs, out _).Pkg);
             break;
+        case "validate":
+            var vp = ParseOptions(cmdArgs, out _);
+            RunValidate(vp.Pkg, vp.Passcode);
+            break;
         case "entries":
             RunEntries(ParseOptions(cmdArgs, out _).Pkg);
             break;
@@ -943,12 +947,14 @@ static void RunPkgBuild(string[] args)
     if (args.Length > 0 && args[0].Equals("build", StringComparison.OrdinalIgnoreCase))
         args = args[1..];
     string? gp4 = null, folder = null, outFile = null, passcode = OrbisPkgTool.Pkg.PkgBuilder.DefaultPasscode;
+    bool validate = false;
     for (int i = 0; i < args.Length; i++)
     {
         switch (args[i])
         {
             case "--passcode" when i + 1 < args.Length: passcode = args[++i]; break;
             case "--out" when i + 1 < args.Length: outFile = args[++i]; break;
+            case "--validate": validate = true; break;
             default:
                 if (!args[i].StartsWith('-'))
                 {
@@ -960,7 +966,7 @@ static void RunPkgBuild(string[] args)
     }
     if (gp4 == null || !File.Exists(gp4))
     {
-        Console.Error.WriteLine("usage: pkg build <project.gp4> <source_folder> [--passcode X] [--out file.pkg]");
+        Console.Error.WriteLine("usage: pkg build <project.gp4> <source_folder> [--passcode X] [--out file.pkg] [--validate]");
         Environment.ExitCode = 2;
         return;
     }
@@ -973,10 +979,38 @@ static void RunPkgBuild(string[] args)
         sw.Stop();
         long size = new FileInfo(outFile).Length;
         Console.WriteLine($"Built {outFile} ({size / 1024.0 / 1024.0:F1} MB) in {sw.Elapsed.TotalSeconds:F1} s");
+        if (validate)
+            RunValidate(outFile, passcode);
     }
     catch (Exception ex)
     {
         Console.Error.WriteLine($"[error] {ex.Message}");
+        Environment.ExitCode = 1;
+    }
+}
+
+/// <summary>Structured 8-stage validation of a built PKG ("validate" / "--validate").</summary>
+static void RunValidate(string pkgPath, string passcode)
+{
+    try
+    {
+        OrbisPkgTool.Pkg.PkgValidator.ValidatePkgFile(pkgPath, passcode,
+            (stage, what) => Console.WriteLine($"  [{stage}/8] Validating {what}"));
+        Console.WriteLine("Validation: PASS");
+    }
+    catch (OrbisPkgTool.Pkg.ValidationFailure vf)
+    {
+        Console.Error.WriteLine("Validation: FAIL");
+        Console.Error.WriteLine($"  Stage: {vf.Stage}");
+        Console.Error.WriteLine($"  Structure: {vf.Structure}");
+        Console.Error.WriteLine($"  Offset: {vf.Offset}");
+        Console.Error.WriteLine($"  Reason: {vf.Message}");
+        Environment.ExitCode = 1;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine("Validation: FAIL");
+        Console.Error.WriteLine($"  Reason: {ex.Message}");
         Environment.ExitCode = 1;
     }
 }
