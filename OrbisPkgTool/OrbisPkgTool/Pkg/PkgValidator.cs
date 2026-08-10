@@ -78,12 +78,18 @@ public static class PkgValidator
 
         // ---- Stage 4: inner PFS ----
         report?.Invoke("4", "inner PFS");
-        using (var inner = new MemoryStream())
+        // The inner PFS can exceed 2 GB — never buffer it in a MemoryStream.
+        string tmpInner = Path.Combine(Path.GetTempPath(), $"opt_validate_{Guid.NewGuid():N}.pfs");
+        try
         {
-            reader.CopyRawInnerPfsTo(inner);
-            inner.Position = 0;
-            var innerReader = PfsReader.Open(new BigEndianReader(inner), 0);
+            reader.ExtractRawInnerPfs(tmpInner);
+            using var innerFs = File.OpenRead(tmpInner);
+            var innerReader = PfsReader.Open(new BigEndianReader(innerFs), 0);
             ValidatePfsBlocks(innerReader, innerReader.Header, "inner PFS");
+        }
+        finally
+        {
+            try { File.Delete(tmpInner); } catch { }
         }
 
         // ---- Stage 5: digests ----
