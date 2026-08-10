@@ -400,7 +400,7 @@ if (Should-Run "M") {
         } else { Add-Result "TEST M inner PFS ($pkgName)" "FAIL" "one extraction missing" }
     }
     Complete-Stage "Inner PFS"
-    Remove-PhaseArtifacts @(Join-Path $Run.InnerPfs "reference", (Join-Path $Run.InnerPfs "ours")) "M: deleted inner PFS dumps"
+    Remove-PhaseArtifacts @((Join-Path $Run.InnerPfs "reference"), (Join-Path $Run.InnerPfs "ours")) "M: deleted inner PFS dumps"
 } else { Set-StageStatus "Inner PFS" "SKIPPED" }
 
 # ---------------- N: outer PFS cross-validation --------------------------
