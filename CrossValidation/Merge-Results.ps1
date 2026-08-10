@@ -69,11 +69,11 @@ if (Test-Path (Join-Path $Base "run_status.txt")) {
     $pStatus = Get-Content (Join-Path $Patch "run_status.txt") -ErrorAction SilentlyContinue
     $sMap = [ordered]@{}
     foreach ($l in $bStatus) {
-        if ($l -match '^\[(\w+)\]\s+(.+)$') { $sMap[$Matches[2].Trim()] = $l }
+        if ($l -match '^\[(\w+)\s*\]\s+(.+)$') { $sMap[$Matches[2].Trim()] = $l }
     }
     if ($pStatus) {
         foreach ($l in $pStatus) {
-            if ($l -match '^\[(\w+)\]\s+(.+)$') { $sMap[$Matches[2].Trim()] = $l }
+            if ($l -match '^\[(\w+)\s*\]\s+(.+)$') { $sMap[$Matches[2].Trim()] = $l }
         }
     }
     Set-Content -Path (Join-Path $Out "run_status.txt") -Value @($sMap.Values) -Encoding utf8
