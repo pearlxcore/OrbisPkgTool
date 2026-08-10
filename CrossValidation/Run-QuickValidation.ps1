@@ -17,6 +17,9 @@ $ErrorActionPreference = "Stop"
 Write-Host "=== OrbisPkgTool EXTERNAL CROSS-VALIDATION (QUICK) ==="
 Write-Host "Result dir: $($Run.Dir)"
 
+foreach ($s in @("Environment", "Capabilities", "Reference baseline", "Ours readability",
+    "Validators", "Entry comparison", "File-list comparison", "Summary")) { Add-Stage $s }
+
 # ── 00 environment report ─────────────────────────────────────────────────
 $envLines = [System.Collections.Generic.List[string]]::new()
 $envLines.Add("OS: $([System.Environment]::OSVersion.VersionString)")
@@ -40,6 +43,8 @@ $drive = Get-PSDrive ([System.IO.Path]::GetPathRoot($Cfg.work_dir).TrimEnd('\')[
 $envLines.Add("Available disk on work drive: $([math]::Round($drive.Free / 1GB, 1)) GB")
 $envLines.Add("Work dir: $($Run.Work)")
 Set-Content -Path (Join-Path $Run.Dir "00_environment.txt") -Value $envLines -Encoding utf8
+Set-StageStatus "Environment" "PASS"
+Set-StageStatus "Capabilities" "RUNNING"
 
 # ── capabilities discovery ────────────────────────────────────────────────
 $cap = [System.Collections.Generic.List[string]]::new()
@@ -60,6 +65,7 @@ CapRow "Generate GP4" "YES (gp4gen)" "YES (gp4_proj_create)" "YES (PkgEditor)"
 CapRow "Build from GP4" "YES (build)" "YES (img_create)" "YES (build)"
 CapRow "Compare packages" "NOT_SUPPORTED" "YES (pkg_compare)" "NOT_SUPPORTED"
 Set-Content -Path (Join-Path $Run.Dir "capabilities.txt") -Value $cap -Encoding utf8
+Set-StageStatus "Capabilities" "PASS"
 
 # ── helpers ───────────────────────────────────────────────────────────────
 $pass = $Cfg.passcode
@@ -103,28 +109,31 @@ function Test-PkgValidate {
 }
 
 # ── A: reference baseline ─────────────────────────────────────────────────
-Add-Result "TEST A reference baseline" "RUNNING"
+Set-StageStatus "Reference baseline" "RUNNING"
 $base = $Run.Sony
 if ($Run.OrigPkgSafe) {
     $r = Test-PkgReadability "baseline_reference" $Run.OrigPkgSafe $base
     $v = Test-PkgValidate "baseline_reference" $Run.OrigPkgSafe $base
 } else { Add-Result "TEST A reference baseline" "SKIPPED_DEPENDENCY_FAILED" "no reference_pkg configured" }
+Complete-Stage "Reference baseline"
 
 # ── B: our built pkg through three readers ────────────────────────────────
-Add-Result "TEST B ours through three readers" "RUNNING"
+Set-StageStatus "Ours readability" "RUNNING"
 $three = @()
 if ($Run.OursPkgSafe) {
     $r = Test-PkgReadability "ours" $Run.OursPkgSafe $Run.Sony
     $three = $r
 } else { Add-Result "TEST B ours through three readers" "SKIPPED_DEPENDENCY_FAILED" "no ours_pkg configured" }
+Complete-Stage "Ours readability"
 
 # ── C: three validators (ours + reference) ────────────────────────────────
-Add-Result "TEST C three validators" "RUNNING"
+Set-StageStatus "Validators" "RUNNING"
 if ($Run.OursPkgSafe) { $null = Test-PkgValidate "ours" $Run.OursPkgSafe $Run.Sony }
 if ($Run.OrigPkgSafe) { $null = Test-PkgValidate "reference" $Run.OrigPkgSafe $Run.Sony }
+Complete-Stage "Validators"
 
 # ── D: entry table differential ───────────────────────────────────────────
-Add-Result "TEST D entry comparison" "RUNNING"
+Set-StageStatus "Entry comparison" "RUNNING"
 $entryComp = [System.Collections.Generic.List[string]]::new()
 $entryComp.Add("EntryId`tField`tOURS`tSONY`tOPENORBIS")
 foreach ($pkgName in @("reference", "ours")) {
@@ -145,9 +154,10 @@ foreach ($pkgName in @("reference", "ours")) {
 }
 Set-Content -Path (Join-Path $Run.Comparisons "entry_comparison.txt") -Value $entryComp -Encoding utf8
 Add-Result "TEST D entry comparison" "PASS (see Comparisons/entry_comparison.txt)"
+Complete-Stage "Entry comparison"
 
 # ── file-list comparison ──────────────────────────────────────────────────
-Add-Result "TEST file-list comparison" "RUNNING"
+Set-StageStatus "File-list comparison" "RUNNING"
 $listComp = [System.Collections.Generic.List[string]]::new()
 foreach ($pkgName in @("reference", "ours")) {
     $pkg = if ($pkgName -eq "reference") { $Run.OrigPkgSafe } else { $Run.OursPkgSafe }
@@ -184,6 +194,7 @@ foreach ($pkgName in @("reference", "ours")) {
     else { Add-Result "file list $pkgName" "EXPECTED_DIFFERENCE" ($only -join "; ") }
 }
 Set-Content -Path (Join-Path $Run.Comparisons "file_list_comparison.txt") -Value $listComp -Encoding utf8
+Complete-Stage "File-list comparison"
 
 # ── summary ───────────────────────────────────────────────────────────────
 $sum = [System.Collections.Generic.List[string]]::new()
@@ -194,7 +205,9 @@ $sum.AddRange($Global:SummaryLines)
 $unexpected = @($Global:SummaryLines | Where-Object { $_ -match "FAIL|ERROR" })
 $sum.Add("------------------------------------------------------------")
 $sum.Add("UNEXPECTED FAILURES/ERRORS: $($unexpected.Count)")
-$sum.Add("PC CROSS-IMPLEMENTATION VALIDATION (QUICK): $(if ($unexpected.Count -eq 0) { 'PASS' } else { 'INCOMPLETE' })")
+$label = $(if ($unexpected.Count -eq 0) { "PASS" } else { "INCOMPLETE" })
+$sum.Add("PC CROSS-IMPLEMENTATION VALIDATION (QUICK): $label")
 Set-Content -Path (Join-Path $Run.Dir "summary.txt") -Value $sum -Encoding utf8
+Set-StageStatus "Summary" "PASS" "PC CROSS-IMPLEMENTATION VALIDATION (QUICK): $label"
 Write-Host ""
 Write-Host "Quick validation complete -> $($Run.Dir)"

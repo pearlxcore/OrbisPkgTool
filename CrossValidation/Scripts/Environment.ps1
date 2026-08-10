@@ -53,6 +53,36 @@ function Add-Result([string]$test, [string]$state, [string]$note = "") {
     Write-Host $line
 }
 
+# ── incremental run status (run_status.txt, rewritten after every stage) ──
+$Global:RunStages = [ordered]@{}
+$Global:StageMark = 0
+
+function Add-Stage([string]$stage) { $Global:RunStages[$stage] = "PENDING" }
+
+function Set-StageStatus([string]$stage, [string]$state, [string]$note = "") {
+    $Global:RunStages[$stage] = $state
+    $out = [System.Collections.Generic.List[string]]::new()
+    foreach ($s in $Global:RunStages.Keys) {
+        $st = $Global:RunStages[$s]
+        $n = if ($note -and $s -eq $stage) { "  $note" } else { "" }
+        $out.Add(("[{0}] {1}{2}" -f $st.PadRight(10), $s, $n))
+    }
+    Set-Content -Path (Join-Path $Run.Dir "run_status.txt") -Value $out -Encoding utf8
+}
+
+# Mark the current stage PASS unless a real FAIL was added since it started
+# (PASS_EXPECTED_WARNINGS / EXPECTED_DIFFERENCE do not count as failures).
+function Complete-Stage([string]$stage, [string]$note = "") {
+    $fail = $false
+    for ($i = $Global:StageMark; $i -lt $Global:SummaryLines.Count; $i++) {
+        if ($Global:SummaryLines[$i] -match "FAIL" -and $Global:SummaryLines[$i] -notmatch "PASS_EXPECTED|EXPECTED_DIFFERENCE") {
+            $fail = $true; break
+        }
+    }
+    Set-StageStatus $stage $(if ($fail) { "FAIL" } else { "PASS" }) $note
+    $Global:StageMark = $Global:SummaryLines.Count
+}
+
 # ── logging ───────────────────────────────────────────────────────────────
 function Invoke-Logged {
     param(
