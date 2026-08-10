@@ -60,6 +60,11 @@ public sealed class Gp4Project
 
     public static Gp4Project Parse(string xml)
     {
+        // gengp4_app writes an XML 1.1 declaration which .NET's parser
+        // rejects — strip any declaration and parse the document body.
+        int declEnd = xml.IndexOf("?>");
+        if (xml.TrimStart().StartsWith("<?xml") && declEnd >= 0)
+            xml = xml[(declEnd + 2)..];
         var doc = XDocument.Parse(xml);
         var proj = new Gp4Project();
         var vol = doc.Descendants("volume").FirstOrDefault();
@@ -96,30 +101,72 @@ public sealed class Gp4Project
         return proj;
     }
 
-    /// <summary>Serializes the project back to GP4 XML.</summary>
+    /// <summary>
+    /// Serializes the project to GP4 XML in the canonical gengp4_app format
+    /// (verified against orbis-pub-cmd 3.87 output):
+    ///   <psproject fmt="gp4" version="1000">
+    ///     <volume>
+    ///       <volume_type>pkg_ps4_app</volume_type>
+    ///       <volume_id>PS4VOLUME</volume_id>
+    ///       <volume_ts>...</volume_ts>
+    ///       <package content_id=... passcode=... storage_type=... app_type=... />
+    ///       <chunk_info>...</chunk_info>
+    ///     </volume>
+    ///     <files>
+    ///       <file targ_path="..." orig_path="..." pfs_compression="enable" />
+    ///     </files>
+    ///     <rootdir />
+    ///   </psproject>
+    /// </summary>
     public string Serialize()
     {
+        var ts = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+        // gengp4_app writes the 32-zero passcode explicitly when none is set.
+        var pass = string.IsNullOrEmpty(Passcode) ? "00000000000000000000000000000000" : Passcode;
         var doc = new XDocument(
             new XElement("psproject",
                 new XAttribute("fmt", "gp4"),
-                new XAttribute("version", "1.0"),
+                new XAttribute("version", "1000"),
                 new XElement("volume",
                     new XElement("volume_type", VolumeTypes.ToXml(VolumeType)),
+                    new XElement("volume_id", "PS4VOLUME"),
+                    new XElement("volume_ts", ts),
                     new XElement("package",
-                        new XElement("content_id", ContentId),
-                        new XElement("passcode", Passcode),
-                        new XElement("storage_type", StorageType),
-                        new XElement("app_type", AppType),
-                        new XElement("version", Version),
-                        new XElement("title_id", TitleId),
-                        new XElement("title", Title),
-                        new XElement("app_version", AppVersion))),
-                new XElement("files",
-                    Files.Select(f =>
-                        new XElement("file",
-                            new XElement("entry", new XAttribute("path", f.EntryPath)),
-                            new XElement("orig_path", f.OrigPath))))));
-        return doc.Declaration?.ToString() + "\n" + doc.ToString();
+                        new XAttribute("content_id", ContentId ?? ""),
+                        new XAttribute("passcode", pass),
+                        new XAttribute("storage_type", StorageType),
+                        new XAttribute("app_type", AppType)),
+                    new XElement("chunk_info",
+                        new XAttribute("chunk_count", "1"),
+                        new XAttribute("scenario_count", "1"),
+                        new XElement("chunks",
+                            new XElement("chunk",
+                                new XAttribute("id", "0"),
+                                new XAttribute("layer_no", "0"),
+                                new XAttribute("label", "Chunk #0"))),
+                        new XElement("scenarios",
+                            new XAttribute("default_id", "0"),
+                            new XElement("scenario",
+                                new XAttribute("id", "0"),
+                                new XAttribute("type", "sp"),
+                                new XAttribute("initial_chunk_count", "1")))),
+                    new XElement("files",
+                        Files.Select(f =>
+                            new XElement("file",
+                                new XAttribute("targ_path", f.EntryPath),
+                                new XAttribute("orig_path", f.OrigPath),
+                                // enable PFSC compression on game content
+                                // (mirrors gengp4_app; sce_sys/sce_module/eboot
+                                //  are written uncompressed by the tool — we
+                                //  enable for everything except sce_sys, matching
+                                //  the observed output)
+                                new XAttribute("pfs_compression",
+                                    f.EntryPath.StartsWith("sce_sys/") ||
+                                    f.EntryPath.StartsWith("sce_module/") ||
+                                    f.EntryPath == "eboot.bin"
+                                        ? "disable" : "enable"))))),
+                new XElement("rootdir")));
+        return "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n" + doc.ToString();
     }
 
     /// <summary>
