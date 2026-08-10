@@ -41,7 +41,7 @@ public static class PkgBuilder
         foreach (var (entryPath, origPath) in project.Files)
         {
             if (entryPath == "sce_sys/param.sfo") continue;
-            string src = Path.Combine(projectFolder, origPath.Replace('/', Path.DirectorySeparatorChar));
+            string src = ResolveSource(projectFolder, origPath);
             if (!File.Exists(src)) continue;
             byte[] data = File.ReadAllBytes(src);
             totalSize += data.Length;
@@ -463,6 +463,20 @@ public static class PkgBuilder
     }
 
     /// <summary>
+    /// Resolves a GP4 orig_path to a source file. gengp4_app writes absolute
+    /// paths ("C:\...\Image0\CONTENT/x") while our gp4gen writes paths relative
+    /// to the GP4. Path.Combine(folder, absolute) already yields the absolute
+    /// path, so this handles both — but normalize separators first.
+    /// </summary>
+    private static string ResolveSource(string projectFolder, string origPath)
+    {
+        var norm = origPath.Replace('/', Path.DirectorySeparatorChar);
+        var combined = Path.Combine(projectFolder, norm);
+        // If origPath was absolute, Path.GetFullPath keeps it absolute.
+        return Path.GetFullPath(combined);
+    }
+
+    /// <summary>
     /// Fail-fast compatibility invariants, checked before any output is written.
     /// Every rule here is an orbis-pub-cmd 3.87 requirement (see PfsFormat.cs).
     /// </summary>
@@ -575,7 +589,7 @@ public static class PkgBuilder
         foreach (var (entryPath, origPath) in project.Files)
         {
             if (entryPath == "sce_sys/param.sfo") continue;
-            string src = Path.Combine(projectFolder, origPath.Replace('/', Path.DirectorySeparatorChar));
+            string src = ResolveSource(projectFolder, origPath);
             if (!File.Exists(src)) continue;
             // Strip "Image0/" prefix — the inner PFS IS Image0, files inside don't need it
             string pfsPath = entryPath.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase)
