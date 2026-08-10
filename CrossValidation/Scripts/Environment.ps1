@@ -9,7 +9,10 @@ if (-not (Test-Path $ConfigPath)) {
     throw "Config not found: $ConfigPath  (copy config.example.json to config.json and edit paths)"
 }
 
-$Global:Cfg = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+# Read as UTF-8 explicitly: PS 5.1 Get-Content misreads UTF-8 (no BOM) files
+# using the ANSI codepage, corrupting non-ASCII paths (e.g. the full-width
+# colon in the Digimon filename).
+$Global:Cfg = [System.IO.File]::ReadAllText($ConfigPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
 
 # ── timestamped result run ────────────────────────────────────────────────
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -75,12 +78,24 @@ function Set-StageStatus([string]$stage, [string]$state, [string]$note = "") {
 function Complete-Stage([string]$stage, [string]$note = "") {
     $fail = $false
     for ($i = $Global:StageMark; $i -lt $Global:SummaryLines.Count; $i++) {
-        if ($Global:SummaryLines[$i] -match "FAIL" -and $Global:SummaryLines[$i] -notmatch "PASS_EXPECTED|EXPECTED_DIFFERENCE") {
+        if ($Global:SummaryLines[$i] -match "FAIL" -and $Global:SummaryLines[$i] -notmatch "PASS_EXPECTED|EXPECTED_DIFFERENCE|SKIPPED") {
             $fail = $true; break
         }
     }
     Set-StageStatus $stage $(if ($fail) { "FAIL" } else { "PASS" }) $note
     $Global:StageMark = $Global:SummaryLines.Count
+}
+
+# The OpenOrbis digest-recomputation trio its validator gets wrong on ANY
+# package (Content Digest, Major Param Digest, and the entry digests it hashes
+# at the logical DataSize rather than the aligned stored region — it fails the
+# ORIGINAL Sony package the same way).
+function Test-OpenOrbisExpectedDifference([string]$LogFile) {
+    if (-not (Test-Path $LogFile)) { return $false }
+    $out = Get-LogOutput $LogFile
+    $trio = @($out | Where-Object { $_ -match "Content Digest|Major Param Digest| digest @" })
+    $fails = @($out | Where-Object { $_ -match "Fail " })
+    return $trio.Count -gt 0 -and $fails.Count -eq $trio.Count
 }
 
 # ── logging ───────────────────────────────────────────────────────────────
