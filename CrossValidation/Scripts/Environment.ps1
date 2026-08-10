@@ -99,9 +99,24 @@ function Get-SonyWarningCount([string]$LogFile) {
 function Test-OpenOrbisExpectedDifference([string]$LogFile) {
     if (-not (Test-Path $LogFile)) { return $false }
     $out = Get-LogOutput $LogFile
-    $trio = @($out | Where-Object { $_ -match "Content Digest|Major Param Digest| digest @" })
-    $fails = @($out | Where-Object { $_ -match "Fail " })
+    # Only FAILING digest-hash checks count as the known OpenOrbis limitation
+    # (Content Digest / Major Param Digest / entry digests hashed at logical
+    # DataSize). Ok digest lines must NOT match — earlier regex matched them.
+    $trio = @($out | Where-Object { $_ -match "^  Fail .*digest @" })
+    $fails = @($out | Where-Object { $_ -match "^  Fail " })
     return $trio.Count -gt 0 -and $fails.Count -eq $trio.Count
+}
+
+# ── phase artifact cleanup (per-phase; respects keep_artifacts) ───────────
+function Remove-PhaseArtifacts {
+    param([string[]]$Paths, [string]$Why = "")
+    if ($Cfg.keep_artifacts) { return }
+    foreach ($p in $Paths) {
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($Why) { Write-Host "  [cleanup] $Why" }
 }
 
 # ── logging ───────────────────────────────────────────────────────────────
