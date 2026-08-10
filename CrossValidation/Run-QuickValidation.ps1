@@ -1,4 +1,4 @@
-# Run-QuickValidation.ps1 — fast PC cross-implementation validation.
+﻿# Run-QuickValidation.ps1 â€” fast PC cross-implementation validation.
 # Environment + capabilities + baseline + three readers + three validators +
 # entry comparison + file-list comparison. No big extractions or rebuilds.
 #
@@ -20,7 +20,7 @@ Write-Host "Result dir: $($Run.Dir)"
 foreach ($s in @("Environment", "Capabilities", "Reference baseline", "Ours readability",
     "Validators", "Entry comparison", "File-list comparison", "Summary")) { Add-Stage $s }
 
-# ── 00 environment report ─────────────────────────────────────────────────
+# â”€â”€ 00 environment report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $envLines = [System.Collections.Generic.List[string]]::new()
 $envLines.Add("OS: $([System.Environment]::OSVersion.VersionString)")
 $envLines.Add("PowerShell: $($PSVersionTable.PSVersion)")
@@ -46,7 +46,7 @@ Set-Content -Path (Join-Path $Run.Dir "00_environment.txt") -Value $envLines -En
 Set-StageStatus "Environment" "PASS"
 Set-StageStatus "Capabilities" "RUNNING"
 
-# ── capabilities discovery ────────────────────────────────────────────────
+# â”€â”€ capabilities discovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $cap = [System.Collections.Generic.List[string]]::new()
 $cap.Add("Operation`tOURS`tSONY`tOPENORBIS")
 function CapRow([string]$op, [string]$ours, [string]$sony, [string]$oo) {
@@ -67,7 +67,7 @@ CapRow "Compare packages" "NOT_SUPPORTED" "YES (pkg_compare)" "NOT_SUPPORTED"
 Set-Content -Path (Join-Path $Run.Dir "capabilities.txt") -Value $cap -Encoding utf8
 Set-StageStatus "Capabilities" "PASS"
 
-# ── helpers ───────────────────────────────────────────────────────────────
+# â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $pass = $Cfg.passcode
 
 function Test-PkgReadability {
@@ -97,8 +97,8 @@ function Test-PkgValidate {
         $sony = if ($e2 -eq 0) { "PASS" } else { "FAIL" }
         # classify Sony warnings
         $so = Get-LogOutput (Join-Path $Dir "$Name`_sony_verify.log")
-        $warns = @($so | Where-Object { $_ -match "\[Warn\]" })
-        if ($warns.Count -gt 0) { $sony = "PASS_EXPECTED_WARNINGS ($($warns.Count) warnings)" }
+        $warns = Get-SonyWarningCount (Join-Path $Dir "$Name`_sony_verify.log")
+        if ($warns -gt 0) { $sony = "PASS_EXPECTED_WARNINGS ($warns)" }
         $ooLog = Join-Path $Dir "$Name`_openorbis_validate.log"
         $e3 = Invoke-OpenOrbis "validate `"$Pkg`"" $ooLog
         $oo = if ($e3 -eq 0) { "PASS" } else { "FAIL" }
@@ -112,7 +112,7 @@ function Test-PkgValidate {
     return @($ours, $sony, $oo)
 }
 
-# ── A: reference baseline ─────────────────────────────────────────────────
+# â”€â”€ A: reference baseline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Reference baseline" "RUNNING"
 $base = $Run.Sony
 if ($Run.OrigPkgSafe) {
@@ -121,7 +121,7 @@ if ($Run.OrigPkgSafe) {
 } else { Add-Result "TEST A reference baseline" "SKIPPED_DEPENDENCY_FAILED" "no reference_pkg configured" }
 Complete-Stage "Reference baseline"
 
-# ── B: our built pkg through three readers ────────────────────────────────
+# â”€â”€ B: our built pkg through three readers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Ours readability" "RUNNING"
 $three = @()
 if ($Run.OursPkgSafe) {
@@ -130,13 +130,13 @@ if ($Run.OursPkgSafe) {
 } else { Add-Result "TEST B ours through three readers" "SKIPPED_DEPENDENCY_FAILED" "no ours_pkg configured" }
 Complete-Stage "Ours readability"
 
-# ── C: three validators (ours + reference) ────────────────────────────────
+# â”€â”€ C: three validators (ours + reference) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Validators" "RUNNING"
 if ($Run.OursPkgSafe) { $null = Test-PkgValidate "ours" $Run.OursPkgSafe $Run.Sony }
 if ($Run.OrigPkgSafe) { $null = Test-PkgValidate "reference" $Run.OrigPkgSafe $Run.Sony }
 Complete-Stage "Validators"
 
-# ── D: entry table differential ───────────────────────────────────────────
+# â”€â”€ D: entry table differential â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Entry comparison" "RUNNING"
 $entryComp = [System.Collections.Generic.List[string]]::new()
 $entryComp.Add("EntryId`tField`tOURS`tSONY`tOPENORBIS")
@@ -160,7 +160,7 @@ Set-Content -Path (Join-Path $Run.Comparisons "entry_comparison.txt") -Value $en
 Add-Result "TEST D entry comparison" "PASS (see Comparisons/entry_comparison.txt)"
 Complete-Stage "Entry comparison"
 
-# ── file-list comparison ──────────────────────────────────────────────────
+# â”€â”€ file-list comparison â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "File-list comparison" "RUNNING"
 $listComp = [System.Collections.Generic.List[string]]::new()
 foreach ($pkgName in @("reference", "ours")) {
@@ -200,7 +200,7 @@ foreach ($pkgName in @("reference", "ours")) {
 Set-Content -Path (Join-Path $Run.Comparisons "file_list_comparison.txt") -Value $listComp -Encoding utf8
 Complete-Stage "File-list comparison"
 
-# ── summary ───────────────────────────────────────────────────────────────
+# â”€â”€ summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $sum = [System.Collections.Generic.List[string]]::new()
 $sum.Add("============================================================")
 $sum.Add("ORBISPKGTOOL EXTERNAL CROSS-VALIDATION (QUICK)")
@@ -215,3 +215,4 @@ Set-Content -Path (Join-Path $Run.Dir "summary.txt") -Value $sum -Encoding utf8
 Set-StageStatus "Summary" "PASS" "PC CROSS-IMPLEMENTATION VALIDATION (QUICK): $label"
 Write-Host ""
 Write-Host "Quick validation complete -> $($Run.Dir)"
+

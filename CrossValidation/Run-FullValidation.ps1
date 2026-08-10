@@ -1,7 +1,7 @@
-# Run-FullValidation.ps1 — full PC cross-implementation validation.
+﻿# Run-FullValidation.ps1 â€” full PC cross-implementation validation.
 # Everything in Quick plus: triple extraction, six-path hashes, extractor
-# validity, roundtrips (ours→Sony, ours→OpenOrbis, OpenOrbis→ours,
-# OpenOrbis→Sony control), GP4 semantics, inner/outer PFS comparison.
+# validity, roundtrips (oursâ†’Sony, oursâ†’OpenOrbis, OpenOrbisâ†’ours,
+# OpenOrbisâ†’Sony control), GP4 semantics, inner/outer PFS comparison.
 #
 # Usage:
 #   .\CrossValidation\Run-FullValidation.ps1 [-ConfigPath path\to\config.json]
@@ -25,7 +25,7 @@ foreach ($s in @("Environment", "Reference baseline", "Ours readability", "Valid
     "Ours extract to OpenOrbis", "OpenOrbis extract to ours", "OpenOrbis to Sony control",
     "GP4 semantics", "Inner PFS", "Outer PFS", "Summary")) { Add-Stage $s }
 
-# ── disk preflight ────────────────────────────────────────────────────────
+# â”€â”€ disk preflight â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $est = 0.0
 foreach ($pkg in @($Run.OrigPkgSafe, $Run.OursPkgSafe)) {
     if ($pkg -and (Test-Path $pkg)) { $est += (Get-Item $pkg).Length * 4.0 }
@@ -36,7 +36,7 @@ Write-Host "Estimated full-run disk need: ~$([math]::Round($est / 1GB, 1)) GB   
 if (($est / 1GB) -gt $avail) { Write-Host "WARNING: may run out of disk" }
 Set-StageStatus "Environment" "PASS"
 
-# ── helper: extract a pkg with a given tool into $dir ─────────────────────
+# â”€â”€ helper: extract a pkg with a given tool into $dir â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function Extract-With {
     param([string]$Tool, [string]$Pkg, [string]$OutDir, [string]$LogFile, [string]$Label)
     New-Item -ItemType Directory -Force $OutDir | Out-Null
@@ -49,7 +49,7 @@ function Extract-With {
     return $exit
 }
 
-# ── A-C: baseline + three readers + validators (same as Quick) ────────────
+# â”€â”€ A-C: baseline + three readers + validators (same as Quick) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Reference baseline" "RUNNING"
 $base = $Run.Sony
 if ($Run.OrigPkgSafe) {
@@ -82,8 +82,8 @@ foreach ($pkgName in @("reference", "ours")) {
         }
         $state = if ($e -eq 0) { "PASS" } else { "FAIL" }
         if ($tool -eq "sony" -and $state -eq "FAIL") {
-            $warns = @(Get-LogOutput $log | Where-Object { $_ -match "\[Warn\]" })
-            if ($warns.Count -gt 0) { $state = "PASS_EXPECTED_WARNINGS ($($warns.Count))" }
+            $warns = Get-SonyWarningCount $log
+            if ($warns -gt 0) { $state = "PASS_EXPECTED_WARNINGS ($warns)" }
         }
         if ($tool -eq "openorbis" -and $state -eq "FAIL" -and (Test-OpenOrbisExpectedDifference $log)) {
             $state = "EXPECTED_DIFFERENCE (OpenOrbis digest recomputation)"
@@ -93,7 +93,7 @@ foreach ($pkgName in @("reference", "ours")) {
 }
 Complete-Stage "Validators"
 
-# ── E: triple extraction of ours.pkg + manifests ──────────────────────────
+# â”€â”€ E: triple extraction of ours.pkg + manifests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Triple extraction" "RUNNING"
 if ($Run.OursPkgSafe) {
     foreach ($tool in @("ours", "sony", "openorbis")) {
@@ -122,7 +122,7 @@ if ($Run.OursPkgSafe) {
 } else { Add-Result "TEST E triple extraction" "SKIPPED_DEPENDENCY_FAILED" }
 Complete-Stage "Triple extraction"
 
-# ── F: six-path content comparison (reference+ours × all extractors) ──────
+# â”€â”€ F: six-path content comparison (reference+ours Ã— all extractors) â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Six-path comparison" "RUNNING"
 $six = [System.Collections.Generic.List[string]]::new()
 foreach ($pkgName in @("reference", "ours")) {
@@ -152,7 +152,7 @@ $sixBad = @($six | Where-Object { $_ -match "DIFFER|ONLY_IN" })
 Add-Result "TEST F six-path comparison" $(if ($sixBad.Count -eq 0) { "PASS" } else { "WARNING" }) "$($sixBad.Count) differences (see file)"
 Complete-Stage "Six-path comparison"
 
-# ── G: extractor validity (reference → ours extract structure) ────────────
+# â”€â”€ G: extractor validity (reference â†’ ours extract structure) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Extractor validity" "RUNNING"
 if ($Run.OrigPkgSafe) {
     $dir = Join-Path $Run.GP4 "ours_extract_of_reference"
@@ -168,7 +168,7 @@ if ($Run.OrigPkgSafe) {
 } else { Add-Result "TEST G extractor validity" "SKIPPED_DEPENDENCY_FAILED" }
 Complete-Stage "Extractor validity"
 
-# ── roundtrip helpers ─────────────────────────────────────────────────────
+# â”€â”€ roundtrip helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function Invoke-RoundTrip {
     param(
         [string]$TestName,
@@ -182,7 +182,7 @@ function Invoke-RoundTrip {
     $image0 = if (Test-Path (Join-Path $SourceImage0 "Image0")) { Join-Path $SourceImage0 "Image0" } else { $SourceImage0 }
     # merge a sibling Sc0/ into Image0/sce_sys/ (the dump layout used by
     # extracts: param.sfo etc. live under Sc0/, rebuilds expect them under
-    # sce_sys/) — this mirrors the restructure step
+    # sce_sys/) â€” this mirrors the restructure step
     $sc0 = Join-Path $SourceImage0 "Sc0"
     if (Test-Path $sc0) {
         $sceSys = Join-Path $image0 "sce_sys"
@@ -194,7 +194,7 @@ function Invoke-RoundTrip {
             Copy-Item -LiteralPath $f.FullName -Destination $dest -Force
         }
     }
-    # OpenOrbis extraction has NO Sc0 section (inner PFS only) — pull param.sfo
+    # OpenOrbis extraction has NO Sc0 section (inner PFS only) â€” pull param.sfo
     # from the reference package so rebuilds have the metadata.
     if (-not (Test-Path (Join-Path $image0 "sce_sys/param.sfo")) -and $Run.OrigPkgSafe) {
         $sceSys = Join-Path $image0 "sce_sys"
@@ -229,7 +229,7 @@ function Invoke-RoundTrip {
             } else { $state = "FAIL" }
         }
         "openorbis" {
-            # OpenOrbis's BuildFSTree walks <rootdir> — include <dir> entries.
+            # OpenOrbis's BuildFSTree walks <rootdir> â€” include <dir> entries.
             New-SonyGp4 -Image0 $image0 -OutPath $gp4 -Passcode $pass -WithRootDirs | Out-Null
             $e = Invoke-OpenOrbis "build `"$gp4`" `"$image0`" `"$OutPkg`" $pass" (Join-Path $rt "openorbis_build.log") "$TestName openorbis build"
             $state = if ($e -eq 0) { "BUILT" } else { "FAIL" }
@@ -251,14 +251,14 @@ function Invoke-RoundTrip {
         }
         $state = if ($e -eq 0) { "PASS" } else { "FAIL" }
         if ($tool -eq "sony" -and $state -eq "FAIL") {
-            $warns = @(Get-LogOutput $log | Where-Object { $_ -match "\[Warn\]" })
-            if ($warns.Count -gt 0) { $state = "PASS_EXPECTED_WARNINGS ($($warns.Count))" }
+            $warns = Get-SonyWarningCount $log
+            if ($warns -gt 0) { $state = "PASS_EXPECTED_WARNINGS ($warns)" }
         }
         if ($tool -eq "openorbis" -and $state -eq "FAIL" -and (Test-OpenOrbisExpectedDifference $log)) {
             # OpenOrbis's validator fails digest checks it gets wrong on ANY
             # package (Content/Major-Param over regenerated metadata, and
             # entry digests hashed at logical DataSize instead of the aligned
-            # stored region — it fails the ORIGINAL Sony package identically).
+            # stored region â€” it fails the ORIGINAL Sony package identically).
             $state = "EXPECTED_DIFFERENCE (OpenOrbis digest recomputation)"
         }
         Add-Result "$TestName validate($tool)" $state
@@ -269,47 +269,47 @@ function Invoke-RoundTrip {
     return "BUILT"
 }
 
-# ── H: our extraction → Sony rebuild ──────────────────────────────────────
+# â”€â”€ H: our extraction â†’ Sony rebuild â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Ours extract to Sony" "RUNNING"
 if ($Run.OrigPkgSafe) {
     $srcDir = Join-Path $Run.GP4 "ours_extract_of_reference"
     $outPkg = Join-Path $Run.RoundTrips "H_sony_roundtrip.pkg"
     $r = Invoke-RoundTrip "H_sony" $srcDir "sony" $outPkg
-    Add-Result "TEST H ours-extract → Sony rebuild" $r
-} else { Add-Result "TEST H ours-extract → Sony rebuild" "SKIPPED_DEPENDENCY_FAILED" }
+    Add-Result "TEST H ours-extract â†’ Sony rebuild" $r
+} else { Add-Result "TEST H ours-extract â†’ Sony rebuild" "SKIPPED_DEPENDENCY_FAILED" }
 Complete-Stage "Ours extract to Sony"
 
-# ── I: our extraction → OpenOrbis rebuild ─────────────────────────────────
+# â”€â”€ I: our extraction â†’ OpenOrbis rebuild â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Ours extract to OpenOrbis" "RUNNING"
 if ($Run.OrigPkgSafe) {
     $srcDir = Join-Path $Run.GP4 "ours_extract_of_reference"
     $outPkg = Join-Path $Run.RoundTrips "I_openorbis_roundtrip.pkg"
     $r = Invoke-RoundTrip "I_openorbis" $srcDir "openorbis" $outPkg
-    Add-Result "TEST I ours-extract → OpenOrbis rebuild" $r
-} else { Add-Result "TEST I ours-extract → OpenOrbis rebuild" "SKIPPED_DEPENDENCY_FAILED" }
+    Add-Result "TEST I ours-extract â†’ OpenOrbis rebuild" $r
+} else { Add-Result "TEST I ours-extract â†’ OpenOrbis rebuild" "SKIPPED_DEPENDENCY_FAILED" }
 Complete-Stage "Ours extract to OpenOrbis"
 
-# ── J: OpenOrbis extraction → ours rebuild ────────────────────────────────
+# â”€â”€ J: OpenOrbis extraction â†’ ours rebuild â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "OpenOrbis extract to ours" "RUNNING"
 if ($Run.OrigPkgSafe) {
     $ooDir = Join-Path $base "ref_extract_openorbis"
     $outPkg = Join-Path $Run.RoundTrips "J_ours_from_openorbis.pkg"
     $r = Invoke-RoundTrip "J_ours" $ooDir "ours" $outPkg
-    Add-Result "TEST J OpenOrbis-extract → ours rebuild" $r
-} else { Add-Result "TEST J OpenOrbis-extract → ours rebuild" "SKIPPED_DEPENDENCY_FAILED" }
+    Add-Result "TEST J OpenOrbis-extract â†’ ours rebuild" $r
+} else { Add-Result "TEST J OpenOrbis-extract â†’ ours rebuild" "SKIPPED_DEPENDENCY_FAILED" }
 Complete-Stage "OpenOrbis extract to ours"
 
-# ── K: OpenOrbis → Sony control ───────────────────────────────────────────
+# â”€â”€ K: OpenOrbis â†’ Sony control â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "OpenOrbis to Sony control" "RUNNING"
 if ($Run.OrigPkgSafe) {
     $ooDir = Join-Path $base "ref_extract_openorbis"
     $outPkg = Join-Path $Run.RoundTrips "K_sony_from_openorbis.pkg"
     $r = Invoke-RoundTrip "K_sony" $ooDir "sony" $outPkg
-    Add-Result "TEST K OpenOrbis → Sony control" $r
-} else { Add-Result "TEST K OpenOrbis → Sony control" "SKIPPED_DEPENDENCY_FAILED" }
+    Add-Result "TEST K OpenOrbis â†’ Sony control" $r
+} else { Add-Result "TEST K OpenOrbis â†’ Sony control" "SKIPPED_DEPENDENCY_FAILED" }
 Complete-Stage "OpenOrbis to Sony control"
 
-# ── L: GP4 semantic comparison (ours gp4gen vs Sony-format adapter) ───────
+# â”€â”€ L: GP4 semantic comparison (ours gp4gen vs Sony-format adapter) â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "GP4 semantics" "RUNNING"
 if ($Run.OrigPkgSafe) {
     $srcDir = Join-Path $Run.GP4 "ours_extract_of_reference"
@@ -328,7 +328,7 @@ if ($Run.OrigPkgSafe) {
 } else { Add-Result "TEST L GP4 semantic comparison" "SKIPPED_DEPENDENCY_FAILED" }
 Complete-Stage "GP4 semantics"
 
-# ── M: inner PFS cross-validation ─────────────────────────────────────────
+# â”€â”€ M: inner PFS cross-validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Inner PFS" "RUNNING"
 foreach ($pkgName in @("reference", "ours")) {
     $pkg = if ($pkgName -eq "reference") { $Run.OrigPkgSafe } else { $Run.OursPkgSafe }
@@ -346,7 +346,7 @@ foreach ($pkgName in @("reference", "ours")) {
 }
 Complete-Stage "Inner PFS"
 
-# ── N: outer PFS cross-validation ─────────────────────────────────────────
+# â”€â”€ N: outer PFS cross-validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Set-StageStatus "Outer PFS" "RUNNING"
 foreach ($pkgName in @("reference", "ours")) {
     $pkg = if ($pkgName -eq "reference") { $Run.OrigPkgSafe } else { $Run.OursPkgSafe }
@@ -357,7 +357,7 @@ foreach ($pkgName in @("reference", "ours")) {
 }
 Complete-Stage "Outer PFS"
 
-# ── cleanup ───────────────────────────────────────────────────────────────
+# â”€â”€ cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 if ($Cfg.cleanup_large_artifacts) {
     foreach ($d in @("$base\ref_extract_*", "$base\ours_extract_*", "$Run\Manifests\*_extract_*")) {
         Get-ChildItem $d -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -365,7 +365,7 @@ if ($Cfg.cleanup_large_artifacts) {
     Write-Host "Large extract artifacts cleaned (manifests and logs kept)."
 }
 
-# ── summary ───────────────────────────────────────────────────────────────
+# â”€â”€ summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 $sum = [System.Collections.Generic.List[string]]::new()
 $sum.Add("============================================================")
 $sum.Add("ORBISPKGTOOL EXTERNAL CROSS-VALIDATION (FULL)")
@@ -380,3 +380,4 @@ Set-Content -Path (Join-Path $Run.Dir "summary.txt") -Value $sum -Encoding utf8
 Set-StageStatus "Summary" "PASS" "PC CROSS-IMPLEMENTATION VALIDATION: $label"
 Write-Host ""
 Write-Host "Full validation complete -> $($Run.Dir)"
+

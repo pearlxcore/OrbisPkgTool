@@ -90,6 +90,12 @@ function Complete-Stage([string]$stage, [string]$note = "") {
 # package (Content Digest, Major Param Digest, and the entry digests it hashes
 # at the logical DataSize rather than the aligned stored region — it fails the
 # ORIGINAL Sony package the same way).
+# Count actual [Warn] lines (exclude the "Number of Warning(s)" trailer).
+function Get-SonyWarningCount([string]$LogFile) {
+    if (-not (Test-Path $LogFile)) { return 0 }
+    return @(Get-LogOutput $LogFile | Where-Object { $_ -match "\[Warn\]" -and $_ -notmatch "Number of Warning" }).Count
+}
+
 function Test-OpenOrbisExpectedDifference([string]$LogFile) {
     if (-not (Test-Path $LogFile)) { return $false }
     $out = Get-LogOutput $LogFile
