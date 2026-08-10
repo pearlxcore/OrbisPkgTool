@@ -352,8 +352,10 @@ static void RunExtract((string Pkg, string? Entry, string? OutDir, string Passco
             {
                 int pct = filesTotal > 0 ? (int)(100.0 * filesDone / filesTotal) : 0;
                 string line = $"  [{pct,3}%] {filesDone}/{filesTotal}  {p.File}";
-                // Pad to clear leftover chars from the previous (longer) line
-                int w = Math.Min(Console.WindowWidth - 1, 120);
+                // Pad to clear leftover chars from the previous (longer) line.
+                // Console.WindowWidth throws when there is no console
+                // (detached/automated runs) — fall back to a fixed width.
+                int w = SafeWindowWidth();
                 if (line.Length < w) line += new string(' ', w - line.Length);
                 Console.Write($"\r{line}");
             }
@@ -361,7 +363,7 @@ static void RunExtract((string Pkg, string? Entry, string? OutDir, string Passco
         if (verbose)
         {
             string done = $"  [100%] {filesTotal}/{filesTotal}  done.";
-            int w = Math.Min(Console.WindowWidth - 1, 120);
+            int w = SafeWindowWidth();
             if (done.Length < w) done += new string(' ', w - done.Length);
             Console.WriteLine($"\r{done}");
         }
@@ -995,7 +997,7 @@ static void RunPkgBuild(string[] args)
                 if (total <= 0) return;
                 int pct = (int)(100.0 * done / total);
                 string line = $"  [{pct,3}%] {stage} ({done / 1e6:F0}/{total / 1e6:F0} MB)";
-                int w = Math.Min(Console.WindowWidth - 1, 120);
+                int w = SafeWindowWidth();
                 if (line.Length < w) line += new string(' ', w - line.Length);
                 Console.Write($"\r{line}");
             },
@@ -1018,6 +1020,16 @@ static void RunPkgBuild(string[] args)
         Console.Error.WriteLine($"[error] {ex.Message}");
         Environment.ExitCode = 1;
     }
+}
+
+/// <summary>
+/// Console width with a fallback for detached/automated runs where
+/// Console.WindowWidth throws ("The handle is invalid").
+/// </summary>
+static int SafeWindowWidth()
+{
+    try { return Math.Min(Console.WindowWidth - 1, 120); }
+    catch { return 120; }
 }
 
 /// <summary>Structured 8-stage validation of a built PKG ("validate" / "--validate").</summary>
