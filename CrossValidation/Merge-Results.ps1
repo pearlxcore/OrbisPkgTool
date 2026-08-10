@@ -76,7 +76,7 @@ if (Test-Path (Join-Path $Base "run_status.txt")) {
             if ($l -match '^\[(\w+)\]\s+(.+)$') { $sMap[$Matches[2].Trim()] = $l }
         }
     }
-    Set-Content -Path (Join-Path $Out "run_status.txt") -Value ($sMap.Values) -Encoding utf8
+    Set-Content -Path (Join-Path $Out "run_status.txt") -Value @($sMap.Values) -Encoding utf8
 }
 
 # ---- per-line provenance ----
