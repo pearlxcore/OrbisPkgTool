@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="OrbisPkgTool.Cli/OrbisPkgTool.Cli.csproj" />
+  <Project Path="OrbisPkgTool.Gui/OrbisPkgTool.Gui.csproj" />
   <Project Path="OrbisPkgTool/OrbisPkgTool.csproj" />
 </Solution>
