@@ -1,0 +1,18 @@
+{
+  "passcode": "00000000000000000000000000000000",
+
+  "OrbisPkgTool": "C:\\Users\\User\\source\\repos\\PS4 Fake Pkg Tools\\OrbisPkgTool\\OrbisPkgTool.Cli\\bin\\Debug\\net10.0-windows\\OrbisPkgTool.Cli.exe",
+  "OrbisPubCmd": "C:\\Users\\User\\source\\repos\\PS4 Fake Pkg Tools\\PS4_Fake_PKG_Tools_3.87_V7\\orbis-pub-cmd.exe",
+  "OpenOrbisDriver": "C:\\Users\\User\\source\\repos\\PS4 Fake Pkg Tools\\CrossValidation\\OpenOrbisDriver\\bin\\Debug\\net10.0-windows\\OpenOrbisDriver.exe",
+
+  "reference_pkg": "D:\\PkgTests\\original.pkg",
+  "ours_pkg": "D:\\PkgTests\\ours.pkg",
+
+  "work_dir": "C:\\Users\\User\\source\\repos\\PS4 Fake Pkg Tools\\CrossValidation\\Work",
+  "results_dir": "C:\\Users\\User\\source\\repos\\PS4 Fake Pkg Tools\\CrossValidation\\Results",
+
+  "label": "Digimon",
+
+  "keep_artifacts": false,
+  "cleanup_large_artifacts": true
+}

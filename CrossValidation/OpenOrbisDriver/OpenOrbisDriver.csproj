@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- TEST-ONLY cross-validation driver. References the OpenOrbis fork of
+       LibOrbisPkg (local build) as an INDEPENDENT implementation (participant C).
+       Not part of the production OrbisPkgTool build. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>OpenOrbisDriver</AssemblyName>
+    <RootNamespace>OpenOrbisDriver</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="LibOrbisPkg.Core">
+      <HintPath>..\lib\LibOrbisPkg.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
