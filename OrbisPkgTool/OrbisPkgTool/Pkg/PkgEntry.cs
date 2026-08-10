@@ -71,12 +71,21 @@ public static class PkgEntryIds
     public const uint PlaygoChunkDat = 0x00001001;
     public const uint PlaygoChunkSha = 0x00001002;
     public const uint PlaygoManifestXml = 0x00001003;
+    // Entry IDs below verified against the original Digimon PKG's entry table
+    // (built by orbis-pub-cmd 3.87) — NOT the older psdevwiki values.
+    public const uint PronunciationXml = 0x00001004;
+    public const uint PronunciationSig = 0x00001005;
+    public const uint Pic1Png = 0x00001006;      // psdevwiki said 0x1241 — real orbis uses 0x1006
+    public const uint ShareParamJson = 0x0000100B;
+    public const uint ShareOverlayImagePng = 0x0000100C;
 
     public const uint Icon0Png = 0x00001200;
     public const uint Pic0Png = 0x00001220;
     public const uint Snd0At9 = 0x00001240;
-    public const uint Pic1Png = 0x00001241;
     public const uint ChangeInfoXml = 0x00001260;
+    public const uint Icon0Dds = 0x00001280;
+    public const uint Pic0Dds = 0x000012A0;
+    public const uint Pic1Dds = 0x000012C0;
     public const uint Trophy00Trp = 0x00001400;
     public const uint UserFileBase = 0x00002000;
 }
@@ -100,11 +109,18 @@ public static class PkgEntryNames
         [PkgEntryIds.PlaygoChunkDat] = "playgo-chunk.dat",
         [PkgEntryIds.PlaygoChunkSha] = "playgo-chunk.sha",
         [PkgEntryIds.PlaygoManifestXml] = "playgo-manifest.xml",
+        [PkgEntryIds.PronunciationXml] = "pronunciation.xml",
+        [PkgEntryIds.PronunciationSig] = "pronunciation.sig",
+        [PkgEntryIds.Pic1Png] = "pic1.png",
+        [PkgEntryIds.ShareParamJson] = "shareparam.json",
+        [PkgEntryIds.ShareOverlayImagePng] = "shareoverlayimage.png",
         [PkgEntryIds.Icon0Png] = "icon0.png",
         [PkgEntryIds.Pic0Png] = "pic0.png",
         [PkgEntryIds.Snd0At9] = "snd0.at9",
-        [PkgEntryIds.Pic1Png] = "pic1.png",
         [PkgEntryIds.ChangeInfoXml] = "changeinfo/changeinfo.xml",
+        [PkgEntryIds.Icon0Dds] = "icon0.dds",
+        [PkgEntryIds.Pic0Dds] = "pic0.dds",
+        [PkgEntryIds.Pic1Dds] = "pic1.dds",
         [PkgEntryIds.Trophy00Trp] = "trophy/trophy00.trp",
     };
 

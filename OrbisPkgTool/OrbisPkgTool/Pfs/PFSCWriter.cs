@@ -2,13 +2,126 @@ namespace OrbisPkgTool.Pfs;
 
 /// <summary>
 /// PFSC container writer — wraps a PFS image into the compressed-PFS format.
-/// Each block is zlib-compressed (window bits 12); blocks that do not
-/// compress (compressed size >= block size) are stored raw. The block table
-/// holds absolute offsets; all header fields are little-endian (validated
-/// against real FPKGs).
+/// Each compressed block is a COMPLETE RFC1950 zlib stream, verified against
+/// real orbis output:
+///   0x48 0x89            zlib header (CMF=0x48 → CINFO=4, 4KiB window; FLG=0x89)
+///   <raw deflate>        level-6 deflate, no zlib wrapper
+///   <4 bytes BE Adler32> of the decompressed block (big-endian, RFC1950 trailer)
+/// Blocks that do not compress (stream size >= block size) are stored raw.
+/// The block table holds absolute offsets; all header fields are little-endian
+/// (validated against real FPKGs).
 /// </summary>
 public static class PFSCWriter
 {
+    /// <summary>Stream-based PFSC build for images that don't fit in memory.</summary>
+    public static void BuildToStream(Stream pfsImage, Stream output, bool storeAllRaw = true)
+    {
+        const int blockSize = 0x10000;
+        long total = pfsImage.Length;
+        int blockCount = (int)((total + blockSize - 1) / blockSize);
+        ulong rounded = (ulong)((long)blockCount * blockSize);
+
+        int tableOffset = 0x400;
+        int dataOffset = 0x10000;
+
+        // Header
+        output.Position = 0;
+        output.Write(new byte[] { (byte)'P', (byte)'F', (byte)'S', (byte)'C' });
+        WriteLe(output, 0u);
+        WriteLe(output, 6u);
+        WriteLe(output, (uint)blockSize);
+        WriteLe(output, (long)blockSize);
+        WriteLe(output, (ulong)tableOffset);
+        WriteLe(output, (ulong)dataOffset);
+        WriteLe(output, rounded);
+
+        // Table (entry 0 = dataOffset, then each block's end offset)
+        long pos = dataOffset;
+        byte[] sizeBuf = new byte[8];
+        for (int i = 0; i <= blockCount; i++)
+        {
+            output.Position = tableOffset + i * 8;
+            WriteLe(output, (ulong)pos);
+            if (i < blockCount)
+            {
+                pfsImage.Position = (long)i * blockSize;
+                long remain = total - (long)i * blockSize;
+                var raw = new byte[(int)Math.Min((long)blockSize, remain)];
+                pfsImage.Read(raw, 0, raw.Length);
+                if (storeAllRaw)
+                {
+                    pos += raw.Length;
+                    continue;
+                }
+                // compressed path: 0x48 0x89 + raw deflate level 6
+                var deflater = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(6, noZlibHeaderOrFooter: true);
+                deflater.SetInput(raw, 0, raw.Length);
+                deflater.Finish();
+                using var z = new MemoryStream();
+                var compBuf = new byte[blockSize];
+                int n;
+                while ((n = deflater.Deflate(compBuf)) > 0) z.Write(compBuf, 0, n);
+                var comp = z.ToArray();
+                // Complete zlib stream: 2-byte header + deflate + 4-byte BE Adler32.
+                if (comp.Length + 6 >= blockSize)
+                    pos += blockSize; // stored raw (block written later)
+                else
+                    pos += comp.Length + 6;
+            }
+        }
+
+        // Data (packed sequentially)
+        pfsImage.Position = 0;
+        if (storeAllRaw)
+        {
+            output.Position = dataOffset;
+            pfsImage.CopyTo(output);
+        }
+        else
+        {
+            var raw = new byte[blockSize];
+            long dataPos = dataOffset;
+            for (int i = 0; i < blockCount; i++)
+            {
+                pfsImage.Position = (long)i * blockSize;
+                long remain = total - (long)i * blockSize;
+                int len = (int)Math.Min((long)blockSize, remain);
+                pfsImage.Read(raw, 0, len);
+                var deflater = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(6, noZlibHeaderOrFooter: true);
+                deflater.SetInput(raw, 0, len);
+                deflater.Finish();
+                using var z = new MemoryStream();
+                var compBuf = new byte[blockSize];
+                int n;
+                while ((n = deflater.Deflate(compBuf)) > 0) z.Write(compBuf, 0, n);
+                var comp = z.ToArray();
+                output.Position = dataPos; // packed sequential — table from pass 1 matches
+                if (comp.Length + 6 >= blockSize)
+                {
+                    output.Write(raw, 0, blockSize);
+                    dataPos += blockSize;
+                }
+                else
+                {
+                    output.WriteByte(0x48); output.WriteByte(0x89);
+                    output.Write(comp, 0, comp.Length);
+                    WriteBe(output, Adler32(raw.AsSpan(0, len)));
+                    dataPos += comp.Length + 6;
+                }
+            }
+        }
+    }
+
+    private static void WriteLe(Stream s, uint v) =>
+        s.Write(new[] { (byte)v, (byte)(v >> 8), (byte)(v >> 16), (byte)(v >> 24) }, 0, 4);
+    private static void WriteLe(Stream s, long v) => WriteLe(s, (ulong)v);
+    private static void WriteLe(Stream s, ulong v) =>
+        s.Write(new[]
+        {
+            (byte)v, (byte)(v >> 8), (byte)(v >> 16), (byte)(v >> 24),
+            (byte)(v >> 32), (byte)(v >> 40), (byte)(v >> 48), (byte)(v >> 56),
+        }, 0, 8);
+
     public static byte[] Build(byte[] pfsImage, bool storeAllRaw = false)
     {
         const int blockSize = 0x10000;
@@ -55,17 +168,24 @@ public static class PFSCWriter
                     z.Write(compBuf, 0, n);
             }
             var comp = z.ToArray();
-            if (comp.Length + 2 >= blockSize)
+            if (comp.Length + 6 >= blockSize)
             {
                 compressedBlocks[i] = new byte[blockSize];
                 Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
             }
             else
             {
-                // 2-byte prefix (0x48 0x89) before the raw deflate, matching orbis.
-                compressedBlocks[i] = new byte[comp.Length + 2];
+                // Complete zlib stream: 0x48 0x89 header + raw deflate +
+                // big-endian Adler32 of the decompressed block (orbis format,
+                // verified against real orbis PFSC sectors).
+                compressedBlocks[i] = new byte[comp.Length + 6];
                 compressedBlocks[i][0] = 0x48; compressedBlocks[i][1] = 0x89;
                 Buffer.BlockCopy(comp, 0, compressedBlocks[i], 2, comp.Length);
+                uint adler = Adler32(pfsImage.AsSpan(i * blockSize, len));
+                compressedBlocks[i][comp.Length + 2] = (byte)(adler >> 24);
+                compressedBlocks[i][comp.Length + 3] = (byte)(adler >> 16);
+                compressedBlocks[i][comp.Length + 4] = (byte)(adler >> 8);
+                compressedBlocks[i][comp.Length + 5] = (byte)adler;
             }
             dataSize += compressedBlocks[i].Length;
         }
@@ -102,6 +222,22 @@ public static class PFSCWriter
             ms.Write(b, 0, b.Length);
         return ms.ToArray();
     }
+
+    /// <summary>RFC1950 Adler-32 of the decompressed block (stored big-endian).</summary>
+    private static uint Adler32(ReadOnlySpan<byte> data)
+    {
+        const uint Mod = 65521;
+        uint a = 1, b = 0;
+        foreach (byte c in data)
+        {
+            a = (a + c) % Mod;
+            b = (b + a) % Mod;
+        }
+        return (b << 16) | a;
+    }
+
+    private static void WriteBe(Stream s, uint v) =>
+        s.Write(new[] { (byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v }, 0, 4);
 
     private static void WriteLe(BinaryWriter w, uint v) =>
         w.Write(new[] { (byte)v, (byte)(v >> 8), (byte)(v >> 16), (byte)(v >> 24) });

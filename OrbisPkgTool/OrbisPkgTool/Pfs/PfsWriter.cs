@@ -24,7 +24,8 @@ public static class PfsWriter
     /// Layout: block 0 header, 1 inodes, 2 superroot dirents, 3 fpt, 4 empty,
     /// then dir dirent blocks, then contiguous file data.
     /// </summary>
-    public static byte[] BuildInnerPfs(List<(string Path, byte[] Data)> files, long fileTime)
+    /// <summary>Builds the inner PFS into the given stream (supports >2GB).</summary>
+    public static void BuildInnerPfsToStream(List<(string Path, byte[] Data)> files, long fileTime, Stream output)
     {
         files = files.OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase).ToList();
 
@@ -57,9 +58,28 @@ public static class PfsWriter
         foreach (var f in fileNodes) f.Number = next++;
         int dinodeCount = (int)next;
 
-        // Block layout: 0=header, 1=inodes, 2=superroot dirents,
-        //   3=fpt, 4=empty, 5=uroot dirents, then dirs, then files.
-        long nextBlock = 6;
+        // Inode-table block count: D32 inodes are 0xA8 bytes, packed with the
+        // skip rule (an inode never straddles a block boundary — verified
+        // against the real Digimon: 739 inodes → 2 blocks, inode 390 at block 2).
+        long inodeBlocks;
+        {
+            long p = BlockSize;
+            for (int i = 0; i < dinodeCount; i++)
+            {
+                if (p % BlockSize > BlockSize - 0xA8) p += BlockSize - (p % BlockSize);
+                p += 0xA8;
+            }
+            inodeBlocks = (p - BlockSize + BlockSize - 1) / BlockSize;
+        }
+
+        // Block layout (matches real orbis): 0=header, 1..N=inode table,
+        //   N+1=superroot dirents, N+2=fpt, N+3=empty, N+4=uroot dirents,
+        //   then dirs, then files.
+        long superBlock = 1 + inodeBlocks;
+        long fptBlock = superBlock + 1;
+        long emptyBlock = fptBlock + 1;
+        long urootBlock = emptyBlock + 1;
+        long nextBlock = urootBlock + 1;
         foreach (var d in dirs)
             d.DirentsBlock = nextBlock++;
         foreach (var f in fileNodes)
@@ -69,54 +89,62 @@ public static class PfsWriter
         }
         long ndblock = nextBlock;
 
-        var image = new byte[ndblock * BlockSize];
-        var w = new BinaryWriter(new MemoryStream(image));
+        // Zero-fill the output up to the full image size (sparse support for files).
+        output.SetLength(ndblock * BlockSize);
+        var w = new BinaryWriter(output, System.Text.Encoding.ASCII, leaveOpen: true);
 
         // ---- Block 0: header (D32, mode 0x8) ----
-        WritePfsHeader(w, PfsMode.UnknownFlagAlwaysSet, dinodeCount, ndblock, fileTime, seed: null);
+        WritePfsHeader(w, PfsMode.UnknownFlagAlwaysSet, dinodeCount, ndblock, fileTime, seed: null,
+            dinodeBlockCount: inodeBlocks);
 
-        // ---- Block 1: inode table (D32, 0xA8 each) ----
+        // ---- Inode table (D32, 0xA8 each, packed) ----
         // FPT records: 8 bytes each (uint32 hash + uint32 inode)
         long fptSize = (dirs.Count + fileNodes.Count) * 8;
         long inodePos = BlockSize;
+        void NextInode() { if (inodePos % BlockSize > BlockSize - 0xA8) inodePos += BlockSize - (inodePos % BlockSize); }
 
-        // Inode 0: superroot (directory, db[0] = block 2)
-        WriteD32Inode(w, inodePos, 0x416D, 1, 0x00020010, BlockSize, 1, 2); inodePos += 0xA8;
+        // Inode 0: superroot (directory, db[0] = superroot block)
+        NextInode();
+        WriteD32Inode(w, inodePos, 0x416D, 1, 0x00020010, BlockSize, 1, superBlock); inodePos += 0xA8;
 
-        // Inode 1: flat_path_table (regular file, db[0] = block 3)
-        WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, 1, 3); inodePos += 0xA8;
+        // Inode 1: flat_path_table (regular file, db[0] = fpt block)
+        NextInode();
+        WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, 1, fptBlock); inodePos += 0xA8;
 
-        // Inode 2: uroot (user root directory, db[0] = block 5)
+        // Inode 2: uroot (user root directory, db[0] = uroot block)
         // nlink = 3 + subdirectories (matches LibOrbisPkg: uroot starts at 3,
         // +1 per subdir; verified against real orbis output)
         int urootNlink = 3 + root.Dirs.Count;
-        WriteD32Inode(w, inodePos, 0x416D, (ushort)urootNlink, 0x00000010, BlockSize, 1, 5); inodePos += 0xA8;
+        NextInode();
+        WriteD32Inode(w, inodePos, 0x416D, (ushort)urootNlink, 0x00000010, BlockSize, 1, urootBlock); inodePos += 0xA8;
 
         // Remaining subdirectories
         foreach (var d in dirs)
         {
             // nlink = 2 + subdirectories (POSIX convention)
             ushort nlink = (ushort)(2 + d.Dirs.Count);
+            NextInode();
             WriteD32Inode(w, inodePos, 0x416D, nlink, 0x00000010, BlockSize, 1, d.DirentsBlock);
             inodePos += 0xA8;
         }
         // Files
         foreach (var f in fileNodes)
         {
+            NextInode();
             WriteD32Inode(w, inodePos, 0x816D, 1, 0x00000010, f.Data.Length,
                 CeilDiv(f.Data.Length, (int)BlockSize), f.StartBlock);
             inodePos += 0xA8;
         }
 
-        // ---- Block 2: superroot dirents (flat_path_table, uroot) ----
-        long superPos = 2 * BlockSize;
+        // ---- Superroot dirents (flat_path_table, uroot) ----
+        long superPos = superBlock * BlockSize;
         WriteDirent(w, ref superPos, 1, PfsDirentType.File, "flat_path_table");    // ino 1
         WriteDirent(w, ref superPos, 2, PfsDirentType.Directory, "uroot");          // ino 2
 
-        // ---- Block 3: flat path table (sorted by hash, 8 bytes/entry) ----
+        // ---- Flat path table (sorted by hash, 8 bytes/entry) ----
         // Upper 4 bits of inode field = flags (0=file, 2=directory)
         // Reader masks with 0x0FFFFFFF to get actual inode number.
-        long fptPos = 3 * BlockSize;
+        long fptPos = fptBlock * BlockSize;
         var fptEntries = new List<(uint Hash, uint Value)>();
         foreach (var d in dirs)
             fptEntries.Add((FptHash(FullPath(d)), d.Number | 0x20000000)); // flag 2 = directory
@@ -133,8 +161,8 @@ public static class PfsWriter
 
         // ---- Block 4: empty (zeros, like real FPKGs) ----
 
-        // ---- Block 5: uroot dirents (populated, with . and .. like real inner FPKGs) ----
-        long pos = 5 * BlockSize;
+        // ---- uroot dirents (populated, with . and .. like real inner FPKGs) ----
+        long pos = urootBlock * BlockSize;
         WriteDirent(w, ref pos, 2, PfsDirentType.Dot, ".");
         WriteDirent(w, ref pos, 2, PfsDirentType.DotDot, "..");
         foreach (var d in root.Dirs)
@@ -155,9 +183,24 @@ public static class PfsWriter
                 WriteDirent(w, ref dpos, f.Number, PfsDirentType.File, f.Name);
         }
         foreach (var f in fileNodes)
-            Buffer.BlockCopy(f.Data, 0, image, (int)(f.StartBlock * BlockSize), f.Data.Length);
+        {
+            output.Position = f.StartBlock * BlockSize;
+            output.Write(f.Data, 0, f.Data.Length);
+        }
+    }
 
-        return image;
+    public static byte[] BuildInnerPfs(List<(string Path, byte[] Data)> files, long fileTime)
+    {
+        // Estimate; fall back to a temp file for images that don't fit in a byte[].
+        long estSize = 6 * BlockSize + files.Sum(f => (long)CeilDiv(f.Data.Length, (int)BlockSize) * BlockSize);
+        if (estSize <= int.MaxValue - 1024)
+        {
+            using var ms = new MemoryStream((int)estSize);
+            BuildInnerPfsToStream(files, fileTime, ms);
+            return ms.ToArray();
+        }
+        throw new InvalidOperationException(
+            $"Inner PFS too large for in-memory build ({estSize} bytes). Use the file-based build path.");
     }
 
     // ------------------------------------------------------------------
@@ -263,6 +306,140 @@ public static class PfsWriter
 
         // ---- Signing (BOTTOM-UP: data → child indirect → ib1 → ib0 → inode) ----
         byte[] signKey = HmacSha256(ekpfs, Concat(Le32(2), seed));
+
+        WriteOuterPfsSignatures(w, image, signKey, dataStart, urootBlock, dataBlocks,
+            indirect1, indirect2, inode0, inode1, inode2, inode3, ndblock, fileTime);
+
+        // ---- XTS-encrypt sectors 16+ (block 0 = plaintext header, block 4 = plaintext empty) ----
+        var (tweakKey, dataKey) = PfsReader.DeriveXtsKeys(
+            new PfsHeader { Mode = PfsMode.Signed | PfsMode.Encrypted | PfsMode.UnknownFlagAlwaysSet, Seed = seed },
+            ekpfs);
+        for (int sector = 16; sector < ndblock * 16; sector++)
+        {
+            if (sector >= emptyBlock * 16 && sector < (emptyBlock + 1) * 16)
+                continue; // the empty block is stored plaintext
+            PfsReader.XtsEncryptSector(image, sector * XtsSectorSize, (ulong)sector, dataKey!, tweakKey!);
+        }
+        return image;
+    }
+
+    /// <summary>Outer PFS builder for images that don't fit in a byte[] (stream based).</summary>
+    public static void BuildOuterPfsToStream(Stream fileData, string fileName, byte[] ekpfs, byte[] seed,
+        long fileTime, Stream output)
+    {
+        long dataBlocks = CeilDiv(fileData.Length, (int)BlockSize);
+        long indirect1 = dataBlocks > 12 ? 1 : 0;
+        long indirect2 = dataBlocks > 12 + 1820 ? 1 : 0;
+        long nIndirect = dataBlocks > 12 + 1820 ? CeilDiv(dataBlocks - 12 - 1820, 1820L) : 0;
+        long urootBlock = 5 + indirect1 + indirect2 + nIndirect;
+        long dataStart = urootBlock + 1;
+        long ndblock = dataStart + dataBlocks;
+        long emptyBlock = 4;
+
+        output.SetLength(ndblock * BlockSize);
+        var w = new BinaryWriter(output, System.Text.Encoding.ASCII, leaveOpen: true);
+
+        WritePfsHeader(w, PfsMode.Signed | PfsMode.Encrypted | PfsMode.UnknownFlagAlwaysSet, 4, ndblock, fileTime, seed);
+
+        long inode0 = BlockSize;
+        long inode1 = BlockSize + 0x2C8;
+        long inode2 = BlockSize + 2 * 0x2C8;
+        long inode3 = BlockSize + 3 * 0x2C8;
+        WriteS32Inode(w, inode0, 0x416D, 1, 0x0002000C, BlockSize, BlockSize, 1, 2, fileTime: fileTime);
+        WriteS32Inode(w, inode1, 0x816D, 1, 0x0002000C, 8, 8, 1, 3, fileTime: fileTime);
+        WriteS32Inode(w, inode2, 0x416D, 3, 0x0000000C, BlockSize, BlockSize, 1, urootBlock, fileTime: fileTime);
+        // sizeUnc = decompressed inner PFS size = PFSC header rounded_file_size
+        // (offset 0x28, LE). pfs_image.dat holds the PFSC container, so its
+        // stored length is the container size, not the inner PFS size.
+        long uncompressed;
+        if (fileData.Length >= 0x30)
+        {
+            long savePos = fileData.Position;
+            fileData.Position = 0;
+            var magic = new byte[4];
+            fileData.ReadExactly(magic, 0, 4);
+            fileData.Position = 0x28;
+            var rbuf = new byte[8];
+            fileData.ReadExactly(rbuf, 0, 8);
+            fileData.Position = savePos;
+            bool isPfsc = magic[0] == 'P' && magic[1] == 'F' && magic[2] == 'S' && magic[3] == 'C';
+            uncompressed = isPfsc ? (long)BitConverter.ToUInt64(rbuf, 0) : fileData.Length;
+        }
+        else
+        {
+            uncompressed = fileData.Length;
+        }
+        WriteS32Inode(w, inode3, 0x816D, 1, 0x0000000D, fileData.Length, uncompressed,
+            dataBlocks, dataStart,
+            indirect1: indirect1 > 0 ? 5 : 0, indirect2: indirect2 > 0 ? 6 : 0, fileTime: fileTime);
+
+        long superPos = 2 * BlockSize;
+        WriteDirent(w, ref superPos, 1, PfsDirentType.File, "flat_path_table");
+        WriteDirent(w, ref superPos, 2, PfsDirentType.Directory, "uroot");
+
+        long fptPos = 3 * BlockSize;
+        WriteFptEntry(w, ref fptPos, fileName, 3);
+
+        long dataPos = 0;
+        if (indirect1 > 0)
+        {
+            WriteIndirectS32(w, 5 * BlockSize, 12, dataStart, ref dataPos, dataBlocks);
+            if (indirect2 > 0)
+            {
+                long childIbBlock = 7;
+                long remaining = dataBlocks - 12 - 1820;
+                long ib1EntryIdx = 0;
+                while (remaining > 0)
+                {
+                    long dataStartIdx = 12 + 1820 + (ib1EntryIdx * 1820);
+                    WriteIndirectS32(w, childIbBlock * BlockSize, dataStartIdx, dataStart, ref dataPos, dataBlocks);
+                    long ib1EntryOff = 6 * BlockSize + (ib1EntryIdx * 36);
+                    w.BaseStream.Position = ib1EntryOff;
+                    w.Write(new byte[32]);
+                    WriteLe(w, (int)childIbBlock);
+                    childIbBlock++;
+                    ib1EntryIdx++;
+                    remaining -= 1820;
+                }
+            }
+        }
+
+        long urootPos = urootBlock * BlockSize;
+        WriteDirent(w, ref urootPos, 2, PfsDirentType.Dot, ".");
+        WriteDirent(w, ref urootPos, 2, PfsDirentType.DotDot, "..");
+        WriteDirent(w, ref urootPos, 3, PfsDirentType.File, fileName);
+
+        // Copy file data into place
+        output.Position = dataStart * BlockSize;
+        fileData.Position = 0;
+        fileData.CopyTo(output);
+
+        // Signing over plaintext, then XTS encrypt — both via stream-safe helpers
+        byte[] signKey = HmacSha256(ekpfs, Concat(Le32(2), seed));
+        WriteOuterPfsSignaturesStream(w, output, signKey, dataStart, urootBlock, dataBlocks,
+            indirect1, indirect2, inode0, inode1, inode2, inode3, ndblock);
+
+        var (tweakKey, dataKey) = PfsReader.DeriveXtsKeys(
+            new PfsHeader { Mode = PfsMode.Signed | PfsMode.Encrypted | PfsMode.UnknownFlagAlwaysSet, Seed = seed },
+            ekpfs);
+        var sector = new byte[XtsSectorSize];
+        for (long s = 16; s < ndblock * 16; s++)
+        {
+            long blk = s / 16;
+            if (blk == emptyBlock) continue; // empty block stays plaintext
+            output.Position = s * XtsSectorSize;
+            output.Read(sector, 0, XtsSectorSize);
+            PfsReader.XtsEncryptSector(sector, 0, (ulong)s, dataKey!, tweakKey!);
+            output.Position = s * XtsSectorSize;
+            output.Write(sector, 0, XtsSectorSize);
+        }
+    }
+
+    /// <summary>Shared signing pass for the byte[] outer PFS.</summary>
+    private static void WriteOuterPfsSignatures(BinaryWriter w, byte[] image, byte[] signKey,
+        long dataStart, long urootBlock, long dataBlocks, long indirect1, long indirect2,
+        long inode0, long inode1, long inode2, long inode3, long ndblock, long fileTime)
+    {
         long ibBase = inode3 + 0x214; // indirect slots start at 0x214 in S32 inode
 
         // 1. Sign data blocks referenced by direct db[] entries (content blocks)
@@ -309,18 +486,6 @@ public static class PfsWriter
         WriteBlockSig(w, 0x50 + 0x68, signKey, image, BlockSize);
         // 7. header sig at 0x380, covering header[0..0x5A0]
         WriteBlockSig(w, 0x380, signKey, image, 0, 0x5A0);
-
-        // ---- XTS-encrypt sectors 16+ (block 0 = plaintext header, block 4 = plaintext empty) ----
-        var (tweakKey, dataKey) = PfsReader.DeriveXtsKeys(
-            new PfsHeader { Mode = PfsMode.Signed | PfsMode.Encrypted | PfsMode.UnknownFlagAlwaysSet, Seed = seed },
-            ekpfs);
-        for (int sector = 16; sector < ndblock * 16; sector++)
-        {
-            if (sector >= emptyBlock * 16 && sector < (emptyBlock + 1) * 16)
-                continue; // the empty block is stored plaintext
-            PfsReader.XtsEncryptSector(image, sector * XtsSectorSize, (ulong)sector, dataKey!, tweakKey!);
-        }
-        return image;
     }
 
     /// <summary>Writes sig = HMAC(signKey, image[offset .. offset+size]) at <paramref name="slot"/>.</summary>
@@ -329,6 +494,78 @@ public static class PfsWriter
         var sig = HmacSha256(signKey, image.AsSpan((int)offset, size).ToArray());
         w.BaseStream.Position = slot;
         w.Write(sig);
+    }
+
+    /// <summary>Stream-based signing pass for the outer PFS.</summary>
+    private static void WriteOuterPfsSignaturesStream(BinaryWriter w, Stream output, byte[] signKey,
+        long dataStart, long urootBlock, long dataBlocks, long indirect1, long indirect2,
+        long inode0, long inode1, long inode2, long inode3, long ndblock)
+    {
+        long ibBase = inode3 + 0x214;
+
+        for (int i = 0; i < Math.Min(dataBlocks, 12); i++)
+            WriteBlockSigStream(w, output, signKey, inode3 + 0x64 + 36 * i, (dataStart + i) * BlockSize);
+        WriteBlockSigStream(w, output, signKey, inode0 + 0x64, 2 * BlockSize);
+        WriteBlockSigStream(w, output, signKey, inode1 + 0x64, 3 * BlockSize);
+        WriteBlockSigStream(w, output, signKey, inode2 + 0x64, urootBlock * BlockSize);
+
+        if (indirect1 > 0)
+        {
+            SignIndirectEntriesStream(w, output, signKey, 5 * BlockSize, dataStart, 12, dataBlocks);
+            if (indirect2 > 0)
+            {
+                long childIbBlock = 7;
+                long remaining = dataBlocks - 12 - 1820;
+                long ib1EntryIdx = 0;
+                while (remaining > 0)
+                {
+                    long dataStartIdx = 12 + 1820 + (ib1EntryIdx * 1820);
+                    SignIndirectEntriesStream(w, output, signKey, childIbBlock * BlockSize, dataStart, dataStartIdx, dataBlocks);
+                    long ib1EntryOff = 6 * BlockSize + (ib1EntryIdx * 36);
+                    WriteBlockSigStream(w, output, signKey, ib1EntryOff, childIbBlock * BlockSize);
+                    childIbBlock++;
+                    ib1EntryIdx++;
+                    remaining -= 1820;
+                }
+                WriteBlockSigStream(w, output, signKey, ibBase + 0 * 36, 5 * BlockSize);
+                WriteBlockSigStream(w, output, signKey, ibBase + 1 * 36, 6 * BlockSize);
+            }
+            else
+            {
+                WriteBlockSigStream(w, output, signKey, ibBase + 0 * 36, 5 * BlockSize);
+            }
+        }
+
+        WriteBlockSigStream(w, output, signKey, 0x50 + 0x68, BlockSize);
+        WriteBlockSigStream(w, output, signKey, 0x380, 0, 0x5A0);
+    }
+
+    private static void WriteBlockSigStream(BinaryWriter w, Stream output, byte[] signKey, long slot, long offset, int size = (int)BlockSize)
+    {
+        output.Position = offset;
+        var buf = new byte[size];
+        int read = 0;
+        while (read < size)
+        {
+            int n = output.Read(buf, read, size - read);
+            if (n <= 0) break;
+            read += n;
+        }
+        var sig = HmacSha256(signKey, buf);
+        w.BaseStream.Position = slot;
+        w.Write(sig);
+    }
+
+    private static void SignIndirectEntriesStream(BinaryWriter w, Stream output, byte[] signKey,
+        long blockOffset, long dataStart, long firstDataIndex, long totalBlocks)
+    {
+        int count = 0;
+        for (int i = 0; i < 1820 && firstDataIndex + i < totalBlocks; i++)
+        {
+            long block = dataStart + firstDataIndex + i;
+            WriteBlockSigStream(w, output, signKey, blockOffset + 36 * count, block * BlockSize);
+            count++;
+        }
     }
 
     /// <summary>Signs the (sig, block) entries of an indirect block pointing at data blocks.</summary>
@@ -349,7 +586,7 @@ public static class PfsWriter
     // ------------------------------------------------------------------
 
     private static void WritePfsHeader(BinaryWriter w, PfsMode mode, long dinodeCount, long ndblock,
-        long fileTime, byte[]? seed)
+        long fileTime, byte[]? seed, long dinodeBlockCount = 1)
     {
         w.BaseStream.Position = 0;
         WriteLe(w, 1L);                    // version
@@ -363,7 +600,7 @@ public static class PfsWriter
         WriteLe(w, 1L);                    // n_block
         WriteLe(w, dinodeCount);
         WriteLe(w, ndblock);
-        WriteLe(w, 1L);                    // dinode_block_count = 1 (matches orbis)
+        WriteLe(w, dinodeBlockCount);      // dinode_block_count (real orbis: 2 for 739 inodes)
         WriteLe(w, 0L);                    // superroot_ino
         // Inode-table dinode at 0x50:
         // mode=0, nlink=1, flags=0x10 (unseeded inner) or 0 (seeded outer)
@@ -372,15 +609,14 @@ public static class PfsWriter
         WriteLe(w, (ushort)0);             // mode
         WriteLe(w, (ushort)1);             // nlink
         WriteLe(w, seed == null ? 0x10u : 0u); // flags
-        long inodeTableSize = 0x10000;     // always 1 block (matches orbis)
-        WriteLe(w, inodeTableSize);        // size
+        long inodeTableSize = dinodeBlockCount * BlockSize;
+        WriteLe(w, inodeTableSize);        // size (real orbis: 131072 for 2 blocks)
         WriteLe(w, inodeTableSize);        // size uncompressed
         WriteLe(w, t); WriteLe(w, t); WriteLe(w, t); WriteLe(w, t);
         WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u);
         WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u); WriteLe(w, 0u);
         WriteLe(w, 0u); WriteLe(w, 0u);
-        // blocks = 1 (matches orbis inner PFS: exactly 1 inode-table block)
-        uint hdrBlocks = 1;
+        uint hdrBlocks = (uint)dinodeBlockCount;
         WriteLe(w, hdrBlocks);             // blocks at offset 0xB0
         WriteLe(w, 0u);                    // padding at offset 0xB4
         // Header dinode db[0] points to the inode table (block 1).

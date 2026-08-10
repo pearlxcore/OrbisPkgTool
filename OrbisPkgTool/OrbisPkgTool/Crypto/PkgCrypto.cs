@@ -89,7 +89,12 @@ public static class PkgCrypto
         return outBuf;
     }
 
-    /// <summary>AES-128-CBC encryption (mirror of the PKG entry decryption).</summary>
+    /// <summary>
+    /// AES-128-CBC encryption (mirror of the PKG entry decryption).
+    /// Returns the FULL padded ciphertext — CBC requires complete blocks.
+    /// The PKG stores encrypted entries at their 16-aligned size; truncating
+    /// the last partial block corrupts decryption (e.g. npbind.dat, 532 → 544).
+    /// </summary>
     public static byte[] EncryptAesCbc(byte[] key, byte[] iv, byte[] data, int originalSize)
     {
         int padded = (data.Length + 15) & ~15;
@@ -101,9 +106,7 @@ public static class PkgCrypto
         aes.Mode = CipherMode.CBC;
         aes.Padding = PaddingMode.None;
         using var enc = aes.CreateEncryptor();
-        var encrypted = enc.TransformFinalBlock(paddedData, 0, padded);
-        Array.Resize(ref encrypted, originalSize);
-        return encrypted;
+        return enc.TransformFinalBlock(paddedData, 0, padded);
     }
 
     /// <summary>

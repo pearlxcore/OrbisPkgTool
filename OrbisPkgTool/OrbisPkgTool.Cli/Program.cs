@@ -54,6 +54,9 @@ try
         case "verify":
             RunVerify(ParseOptions(cmdArgs, out _).Pkg);
             break;
+        case "entries":
+            RunEntries(ParseOptions(cmdArgs, out _).Pkg);
+            break;
         case "fixdigests":
             RunFixDigestsDebug(ParseOptions(cmdArgs, out _).Pkg);
             break;
@@ -252,6 +255,7 @@ try
 catch (Exception ex)
 {
     Console.Error.WriteLine($"[error] {ex.Message}");
+    if (ex.StackTrace != null) Console.Error.WriteLine(ex.StackTrace.Split('\n').Take(6));
     Environment.ExitCode = 1;
 }
 
@@ -587,6 +591,7 @@ static void RunSfo(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"[error] {ex.Message}");
+        if (ex.StackTrace != null) Console.Error.WriteLine(ex.StackTrace);
         Environment.ExitCode = 1;
     }
 }
@@ -855,6 +860,18 @@ static void RunGp4Gen(string[] args)
     {
         Console.Error.WriteLine($"[error] {ex.Message}");
         Environment.ExitCode = 1;
+    }
+}
+
+/// <summary>Dumps the PKG entry table: id, name, size (diagnostic).</summary>
+static void RunEntries(string pkgPath)
+{
+    using var reader = new PkgReader(pkgPath);
+    foreach (var e in reader.Entries)
+    {
+        string id = ((int)e.Id).ToString("X8");
+        string flags = ((int)e.Flags1).ToString("X8");
+        Console.WriteLine($"0x{id} 0x{flags} {e.Name ?? "-",-24} {e.DataSize,10} @0x{e.DataOffset:X8}");
     }
 }
 
@@ -1306,11 +1323,24 @@ static void RunDumpInnerFile(string pkgPath, string outPath)
 {
     using var reader = new PkgReader(pkgPath);
     reader.ExtractRawInnerPfs(outPath);
-    var bytes = File.ReadAllBytes(outPath);
-    Console.WriteLine($"Inner PFS saved: {outPath} ({bytes.Length} bytes, {bytes.Length/0x10000} blocks)");
-    Console.WriteLine($"SHA256: {Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))}");
-    Console.WriteLine($"First 16: {Convert.ToHexString(bytes.AsSpan(0, Math.Min(16, bytes.Length)))}");
-    Console.WriteLine($"ndinode={BitConverter.ToInt64(bytes,0x2C)} ndblock={BitConverter.ToInt64(bytes,0x34)}");
+    // Streamed summary — the inner PFS can exceed 2 GB (never ReadAllBytes).
+    long len = new FileInfo(outPath).Length;
+    var hb = new byte[0x50];
+    using (var rs = File.OpenRead(outPath))
+        rs.ReadExactly(hb, 0, hb.Length);
+    using var sha = System.Security.Cryptography.SHA256.Create();
+    using (var rs = File.OpenRead(outPath))
+    {
+        var buf = new byte[1 << 20];
+        int n;
+        while ((n = rs.Read(buf, 0, buf.Length)) > 0)
+            sha.TransformBlock(buf, 0, n, null, 0);
+        sha.TransformFinalBlock([], 0, 0);
+    }
+    Console.WriteLine($"Inner PFS saved: {outPath} ({len} bytes, {len/0x10000} blocks)");
+    Console.WriteLine($"SHA256: {Convert.ToHexString(sha.Hash!)}");
+    Console.WriteLine($"First 16: {Convert.ToHexString(hb.AsSpan(0, 16))}");
+    Console.WriteLine($"ndinode={BitConverter.ToInt64(hb,0x30)} ndblock={BitConverter.ToInt64(hb,0x38)} ndinodeblock={BitConverter.ToInt64(hb,0x40)}");
 }
 
 /// <summary>Extracts the raw PFSC-compressed pfs_image.dat from a PKG.</summary>
