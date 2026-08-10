@@ -110,6 +110,9 @@ try
         case "restruct":
             RunRestructure(cmdArgs[1..]);
             break;
+        case "repack":
+            RunRepack(cmdArgs[1..]);
+            break;
         case "pfscompare":
         case "pfscmp":
             RunPfsCompare(cmdArgs[1..]);
@@ -789,6 +792,167 @@ static void RunRestructure(string[] args)
 
     Console.WriteLine();
     Console.WriteLine("Restructure complete. Ready for gp4gen.");
+}
+
+/// <summary>
+/// Full extract→restructure→gp4gen→build→validate in a single command.
+/// Paths with special characters (&amp;, [, ], spaces, Unicode) are handled
+/// natively — no shell escaping needed.
+///
+/// Usage:
+///   repack &lt;input.pkg&gt; [--out &lt;output.pkg&gt;] [--passcode X]
+///          [--validate] [--pfsc-mode store|compressed]
+///          [--title "Name"] [--title-id CUSA00001]
+///          [--work-dir &lt;dir&gt;]
+/// </summary>
+static void RunRepack(string[] args)
+{
+    string? pkg = null, outFile = null, passcode = PkgBuilder.DefaultPasscode;
+    string? title = null, titleId = null, contentId = null;
+    string? workDir = null;
+    bool validate = false;
+    string pfscMode = "store";
+
+    for (int i = 0; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--out"       when i + 1 < args.Length: outFile    = args[++i]; break;
+            case "--passcode"   when i + 1 < args.Length: passcode   = args[++i]; break;
+            case "--title"     when i + 1 < args.Length: title      = args[++i]; break;
+            case "--title-id"  when i + 1 < args.Length: titleId    = args[++i]; break;
+            case "--content-id" when i + 1 < args.Length: contentId  = args[++i]; break;
+            case "--pfsc-mode" when i + 1 < args.Length: pfscMode   = args[++i]; break;
+            case "--work-dir"  when i + 1 < args.Length: workDir    = args[++i]; break;
+            case "--validate": validate = true; break;
+            default:
+                if (!args[i].StartsWith('-')) pkg = args[i];
+                break;
+        }
+    }
+
+    if (pkg == null || !File.Exists(pkg))
+    {
+        Console.Error.WriteLine("usage: repack <input.pkg> [--out <output.pkg>] [--passcode X]");
+        Console.Error.WriteLine("              [--validate] [--pfsc-mode store|compressed]");
+        Console.Error.WriteLine("              [--title \"Name\"] [--title-id CUSA00001]");
+        Console.Error.WriteLine("              [--work-dir <dir>]");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("  Full extract→restructure→gp4gen→build in one command.");
+        Console.Error.WriteLine("  Paths with &, [, ], spaces, Unicode all pass through natively.");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    Console.WriteLine("===================================================================");
+    Console.WriteLine("  OrbisPkgTool REPACK");
+    Console.WriteLine("  Input : " + pkg);
+    Console.WriteLine("===================================================================");
+    Console.WriteLine();
+
+    // ── Setup work directory ────────────────────────────────────
+    if (workDir == null)
+    {
+        string baseName = Path.GetFileNameWithoutExtension(pkg);
+        // Sanitise just enough for a folder name (replace truly hostile chars)
+        var safe = new string(baseName.Select(c =>
+                Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray());
+        workDir = Path.Combine(Path.GetTempPath(), $"pkg_repack_{safe}_{Guid.NewGuid():N}".Substring(0, 60));
+    }
+    Directory.CreateDirectory(workDir);
+    string dumpDir   = Path.Combine(workDir, "dump");
+    string image0Dir = Path.Combine(dumpDir, "Image0");
+    string gp4Path   = Path.Combine(workDir, "project.gp4");
+
+    if (outFile == null)
+        outFile = Path.Combine(workDir, Path.GetFileNameWithoutExtension(pkg) + "_rebuilt.pkg");
+
+    Console.WriteLine($"Work dir : {workDir}");
+    Console.WriteLine($"Output   : {outFile}");
+    Console.WriteLine();
+
+    var overallSw = System.Diagnostics.Stopwatch.StartNew();
+
+    try
+    {
+        // ── 1. Extract ──────────────────────────────────────────
+        Console.WriteLine("[1/5] Extracting PKG...");
+        using (var reader = new PkgReader(pkg, passcode))
+        {
+            if (reader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
+                Console.Error.WriteLine($"[warn] {reader.PasscodeStatus}");
+
+            Directory.CreateDirectory(dumpDir);
+            int done = 0, total = 0;
+            reader.ExtractAll(dumpDir, new Progress<(int Current, int Total, string File)>(p =>
+            {
+                done = p.Current; total = p.Total;
+                int pct = total > 0 ? (int)(100.0 * done / total) : 0;
+                string line = $"  [{pct,3}%] {p.File}";
+                int w = SafeWindowWidth();
+                if (line.Length < w) line += new string(' ', w - line.Length);
+                Console.Write($"\r{line}");
+            }));
+            if (total > 0) Console.WriteLine($"\r  [100%] {total} files extracted.");
+        }
+
+        // ── 2. Check for inner PFS ──────────────────────────────
+        if (!Directory.Exists(image0Dir) ||
+            (!File.Exists(Path.Combine(image0Dir, "eboot.bin")) &&
+             Directory.GetFiles(image0Dir, "*", SearchOption.AllDirectories).Length == 0))
+        {
+            Console.Error.WriteLine("[error] No Image0 content extracted — this is an update/DLC PKG.");
+            Console.Error.WriteLine("        Repack requires an app PKG with an inner PFS (game files).");
+            Console.Error.WriteLine($"Work dir kept for inspection: {workDir}");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        // ── 3. Restructure ──────────────────────────────────────
+        Console.WriteLine("[2/5] Restructuring dump...");
+        RunRestructure([dumpDir]);
+
+        // ── 4. Generate GP4 ─────────────────────────────────────
+        Console.WriteLine("[3/5] Generating GP4 project...");
+        var gp4Args = new List<string> { image0Dir, "--out", gp4Path };
+        if (title != null)      { gp4Args.Add("--title");      gp4Args.Add(title); }
+        if (titleId != null)    { gp4Args.Add("--title-id");   gp4Args.Add(titleId); }
+        if (contentId != null)  { gp4Args.Add("--content-id"); gp4Args.Add(contentId); }
+        if (passcode != PkgBuilder.DefaultPasscode) { gp4Args.Add("--passcode"); gp4Args.Add(passcode); }
+        RunGp4Gen(gp4Args.ToArray());
+
+        // ── 5. Build ────────────────────────────────────────────
+        Console.WriteLine("[4/5] Building PKG (pure C#)...");
+        var buildArgs = new List<string> { gp4Path, image0Dir, "--out", outFile, "--passcode", passcode };
+        if (pfscMode != "store") { buildArgs.Add("--pfsc-mode"); buildArgs.Add(pfscMode); }
+        RunPkgBuild(buildArgs.ToArray());
+        var pkgSize = new FileInfo(outFile).Length;
+        Console.WriteLine($"  Output: {outFile} ({pkgSize / 1024.0 / 1024.0:F1} MB)");
+
+        // ── 6. Validate ─────────────────────────────────────────
+        if (validate)
+        {
+            Console.WriteLine("[5/5] Validating rebuilt PKG...");
+            RunValidate(outFile, passcode);
+        }
+
+        overallSw.Stop();
+        Console.WriteLine();
+        Console.WriteLine("===================================================================");
+        Console.WriteLine($"  REPACK COMPLETE in {overallSw.Elapsed.TotalSeconds:F1}s");
+        Console.WriteLine($"  Output: {outFile}");
+        Console.WriteLine($"  Work:   {workDir}");
+        Console.WriteLine("===================================================================");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine();
+        Console.Error.WriteLine($"[error] Repack failed: {ex.Message}");
+        if (ex.StackTrace != null)
+            Console.Error.WriteLine(ex.StackTrace);
+        Console.Error.WriteLine($"Work dir kept for debugging: {workDir}");
+        Environment.ExitCode = 1;
+    }
 }
 
 /// <summary>
