@@ -603,34 +603,154 @@ static void RunSfo(string[] args)
 }
 
 /// <summary>
-/// Restructures extracted PKG dump to match what gengp4 expects:
-/// Moves Sc0/* → Image0/sce_sys/, deletes Sc0/,
-/// deletes playgo-chunk.dat/sha and playgo-manifest.xml from sce_sys.
-/// Usage: restructure <dump_folder>  (folder containing Image0/ and Sc0/)
+/// Restructures extracted PKG dump to match what gp4gen expects.
+/// Merges Sc0/* → Image0/sce_sys/, deletes Sc0/, removes files
+/// that Sony's img_create regenerates (PlayGo, license, psreserved,
+/// about/).  With --check, validates the dump structure first and
+/// reports readiness without modifying anything.
+///
+/// Usage:
+///   restructure <dump_folder>                   apply all fixes
+///   restructure <dump_folder> --check           validate only (dry-run)
+///   restructure <dump_folder> --verbose         show detail
 /// </summary>
 static void RunRestructure(string[] args)
 {
-    if (args.Length < 1)
+    bool check = false, verbose = false;
+    string? folder = null;
+    for (int i = 0; i < args.Length; i++)
     {
-        Console.Error.WriteLine("usage: restructure <dump_folder>");
+        switch (args[i])
+        {
+            case "--check": check = true; break;
+            case "--verbose": case "-v": verbose = true; break;
+            default:
+                if (!args[i].StartsWith('-')) folder = args[i];
+                break;
+        }
+    }
+
+    if (folder == null)
+    {
+        Console.Error.WriteLine("usage: restructure <dump_folder> [--check] [--verbose]");
         Environment.ExitCode = 2;
         return;
     }
-    string root = Path.GetFullPath(args[0]);
+
+    string root = Path.GetFullPath(folder);
     string img0 = Path.Combine(root, "Image0");
-    string sc0 = Path.Combine(root, "Sc0");
+    string sc0  = Path.Combine(root, "Sc0");
     string sceSys = Path.Combine(img0, "sce_sys");
+
+    // ── Validation ───────────────────────────────────────────────
+    var issues = new List<string>();
+    var warnings = new List<string>();
 
     if (!Directory.Exists(img0))
     {
         Console.Error.WriteLine($"[error] Image0 folder not found in {root}");
+        if (!Directory.Exists(sc0))
+            Console.Error.WriteLine("        Neither Image0/ nor Sc0/ exists — not an extracted dump?");
+        else
+            Console.Error.WriteLine("        Only Sc0/ found — this is an update/DLC PKG (no inner PFS).");
+        Console.Error.WriteLine("        Cannot restructure without Image0/.");
         Environment.ExitCode = 1;
         return;
     }
 
-    // Move Sc0 files into Image0/sce_sys
+    Console.WriteLine($"Image0: {root}\\Image0");
+
+    // Count what we have
+    int image0Files = Directory.GetFiles(img0, "*", SearchOption.AllDirectories).Length;
+    int image0Dirs  = Directory.GetDirectories(img0, "*", SearchOption.AllDirectories).Length;
+    Console.WriteLine($"  {image0Files} files, {image0Dirs} dirs");
+
+    // Key files
+    var keyFiles = new[] { "eboot.bin", "sce_sys/param.sfo", "sce_sys/keystone" };
+    foreach (var kf in keyFiles)
+    {
+        var p = Path.Combine(img0, kf.Replace('/', Path.DirectorySeparatorChar));
+        var found = File.Exists(p);
+        if (verbose || !found)
+            Console.WriteLine($"  {(found ? "[OK]" : "[MISSING]")} {kf}");
+        if (!found) warnings.Add($"Missing {kf} (gp4gen will still work, but the rebuild may lack metadata)");
+    }
+
     if (Directory.Exists(sc0))
     {
+        int sc0Files = Directory.GetFiles(sc0, "*", SearchOption.AllDirectories).Length;
+        Console.WriteLine($"Sc0:    {sc0Files} files (will be merged into Image0/sce_sys/)");
+        bool hasParamSfo = File.Exists(Path.Combine(sc0, "param.sfo"));
+        if (hasParamSfo) Console.WriteLine("  [OK] param.sfo present (required)");
+        else issues.Add("Sc0/param.sfo is missing — build will lack metadata.");
+    }
+    else
+    {
+        Console.WriteLine("Sc0:    not present (already restructured, or update/DLC PKG)");
+    }
+
+    // Check for files Sony will regenerate (warn if present)
+    var sonyRegen = new[] { "license.dat", "license.info", "psreserved.dat",
+        "playgo-chunk.dat", "playgo-chunk.sha", "playgo-manifest.xml", "param.sfo.original" };
+    var regenFound = sonyRegen.Where(f =>
+            File.Exists(Path.Combine(sceSys, f)) ||
+            File.Exists(Path.Combine(sc0, f)))
+        .ToList();
+
+    // About dir
+    var aboutDir = Path.Combine(sceSys, "about");
+    if (Directory.Exists(aboutDir))
+        regenFound.Add("about/ (directory)");
+
+    if (regenFound.Count > 0)
+    {
+        Console.WriteLine($"Sony-regenerated files found ({regenFound.Count}):");
+        foreach (var f in regenFound)
+            Console.WriteLine($"  [WILL DELETE] {f}");
+        if (!check)
+            Console.WriteLine("  These will be removed — Sony's img_create regenerates them.");
+    }
+
+    // Summary
+    Console.WriteLine();
+    if (issues.Count > 0)
+    {
+        Console.Error.WriteLine("=== STRUCTURAL ISSUES ===");
+        foreach (var i in issues) Console.Error.WriteLine($"  [FAIL] {i}");
+    }
+    if (warnings.Count > 0)
+    {
+        Console.Error.WriteLine("=== WARNINGS ===");
+        foreach (var w in warnings) Console.Error.WriteLine($"  [WARN] {w}");
+    }
+    if (issues.Count == 0 && warnings.Count == 0 && regenFound.Count == 0 && Directory.Exists(sc0))
+        Console.WriteLine("Dump looks healthy — ready to restructure.");
+    else if (issues.Count == 0)
+        Console.WriteLine("Dump looks healthy (already restructured).");
+
+    if (check)
+    {
+        Console.WriteLine();
+        if (issues.Count == 0)
+            Console.WriteLine("Check PASSED — dump is ready for gp4gen.");
+        else
+            Console.Error.WriteLine("Check FAILED — fix the issues above first.");
+        Environment.ExitCode = issues.Count > 0 ? 1 : 0;
+        return;
+    }
+
+    if (!Directory.Exists(sc0) && regenFound.Count == 0)
+    {
+        Console.WriteLine("Nothing to restructure — dump is already clean.");
+        return;
+    }
+
+    // ── Apply ────────────────────────────────────────────────────
+
+    // 1. Merge Sc0 → Image0/sce_sys
+    if (Directory.Exists(sc0))
+    {
+        Console.WriteLine("--- Merging Sc0 → Image0/sce_sys ---");
         Directory.CreateDirectory(sceSys);
         foreach (var file in Directory.GetFiles(sc0, "*", SearchOption.AllDirectories))
         {
@@ -638,35 +758,36 @@ static void RunRestructure(string[] args)
             string dest = Path.Combine(sceSys, rel);
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
             File.Move(file, dest, overwrite: true);
-            Console.WriteLine($"  Moved: Sc0/{rel} → Image0/sce_sys/{rel}");
+            Console.WriteLine($"  Move: Sc0/{rel} → Image0/sce_sys/{rel}");
         }
         Directory.Delete(sc0, recursive: true);
-        Console.WriteLine("  Deleted Sc0/ folder.");
-    }
-    else
-    {
-        Console.WriteLine("  No Sc0/ folder found — already restructured?");
+        Console.WriteLine("  Deleted Sc0/");
     }
 
-    // Delete PlayGo files (gengp4 regenerates them)
-    foreach (string f in new[] { "playgo-chunk.dat", "playgo-chunk.sha", "playgo-manifest.xml" })
+    // 2. Delete Sony-regenerated files (even if Sc0 was already merged)
+    Console.WriteLine("--- Cleaning Sony-regenerated files ---");
+    foreach (string f in sonyRegen)
     {
-        string path = Path.Combine(sceSys, f);
-        string appPath = Path.Combine(sceSys, "app", f);
+        var path = Path.Combine(sceSys, f);
+        var appPath = Path.Combine(sceSys, "app", f);
         foreach (string p in new[] { path, appPath })
         {
             if (File.Exists(p))
             {
                 File.Delete(p);
-                Console.WriteLine($"  Deleted: {Path.GetRelativePath(root, p)}");
+                Console.WriteLine($"  Delete: {Path.GetRelativePath(root, p)}");
             }
         }
     }
 
-    // Delete param.sfo backups
-    string bak = Path.Combine(sceSys, "param.sfo.original");
-    if (File.Exists(bak)) { File.Delete(bak); Console.WriteLine("  Deleted: param.sfo.original"); }
+    // 3. Delete about/ dir (Sony generates sce_sys/about/right.sprx)
+    if (Directory.Exists(aboutDir))
+    {
+        Directory.Delete(aboutDir, recursive: true);
+        Console.WriteLine($"  Delete: {Path.GetRelativePath(root, aboutDir)}");
+    }
 
+    Console.WriteLine();
     Console.WriteLine("Restructure complete. Ready for gp4gen.");
 }
 
