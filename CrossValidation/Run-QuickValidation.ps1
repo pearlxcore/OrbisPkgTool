@@ -99,8 +99,12 @@ function Test-PkgValidate {
         $so = Get-LogOutput (Join-Path $Dir "$Name`_sony_verify.log")
         $warns = @($so | Where-Object { $_ -match "\[Warn\]" })
         if ($warns.Count -gt 0) { $sony = "PASS_EXPECTED_WARNINGS ($($warns.Count) warnings)" }
-        $e3 = Invoke-OpenOrbis "validate `"$Pkg`"" (Join-Path $Dir "$Name`_openorbis_validate.log")
+        $ooLog = Join-Path $Dir "$Name`_openorbis_validate.log"
+        $e3 = Invoke-OpenOrbis "validate `"$Pkg`"" $ooLog
         $oo = if ($e3 -eq 0) { "PASS" } else { "FAIL" }
+        if ($oo -eq "FAIL" -and (Test-OpenOrbisExpectedDifference $ooLog)) {
+            $oo = "EXPECTED_DIFFERENCE (OpenOrbis digest recomputation)"
+        }
     } else {
         $ours = "NOT_FOUND"; $sony = "NOT_FOUND"; $oo = "NOT_FOUND"
     }
