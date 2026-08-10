@@ -23,11 +23,37 @@ if (-not $Out) {
 }
 New-Item -ItemType Directory -Force $Out | Out-Null
 
-# ---- key of a summary line: the test name (everything before 2+ spaces) ----
+# ---- key of a summary line: the test name ----
+# Extraction rules, first match wins:
+#   1. text before 2+ spaces (normal Add-Result layout)
+#   2. text before the first TAB, then strip a trailing " F"/" D"
+#      (roundtrip lines whose padding collapsed to a single space)
+#   3. text before " BUILT" (old full-run BUILT_FAILED lines with
+#      single-space padding)
+# Old full-run summaries also carry a UTF-8 arrow (U+2192) that later
+# got double-mojibake'd into the literal sequence U+00E2 U+2020 U+2019
+# ("â†'") by an ANSI round-trip. Re-runs use "->" — normalize BOTH
+# spellings to "->" so the re-run line replaces its old counterpart.
 function Get-Key([string]$line) {
-    $m = [regex]::Match($line, '^\S.*?\s{2,}')
-    if ($m.Success) { return $m.Value.Trim() }
-    return $line.Trim()
+    $key = $line.TrimEnd()
+    # 2+ spaces NOT at end-of-line (trailing padding must not count)
+    $m2 = [regex]::Match($line, '^(\S.*?)\s{2,}\S')
+    if ($m2.Success) {
+        $key = $m2.Groups[1].Value.Trim()
+    } else {
+        $tab = $line.IndexOf("`t")
+        if ($tab -ge 0) {
+            $key = $line.Substring(0, $tab).TrimEnd()
+            if ($key -match ' [FD]$') { $key = $key.Substring(0, $key.Length - 2) }
+        } else {
+            $b = $line.IndexOf(" BUILT")
+            if ($b -ge 0) { $key = $line.Substring(0, $b).TrimEnd() }
+            else { $key = $line.Trim() }
+        }
+    }
+    $key = $key -replace [string][char]0x2192, '->'
+    $key = $key -replace ([string][char]0xE2 + [string][char]0x2020 + [string][char]0x2019), '->'
+    return $key
 }
 
 $baseLines = Get-Content (Join-Path $Base "summary.txt")
