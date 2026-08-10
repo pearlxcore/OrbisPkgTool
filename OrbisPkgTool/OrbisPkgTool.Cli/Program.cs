@@ -256,6 +256,9 @@ try
         case "pkgfields":
             Environment.ExitCode = PkgFieldDump.Run(cmdArgs[1..]);
             break;
+        case "s4trace":
+            Environment.ExitCode = S4Trace.Run(ParseOptions(cmdArgs, out _).Pkg);
+            break;
         case "help":
         case "-h":
         case "--help":
