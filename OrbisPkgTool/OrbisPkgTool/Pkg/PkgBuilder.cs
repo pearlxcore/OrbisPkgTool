@@ -361,6 +361,10 @@ public static class PkgBuilder
         WriteBe32(hdr, 0x70, 0x0000000F);
         WriteBe32(hdr, 0x74, (uint)(project.VolumeType == VolumeType.PkgPs4Patch ? 0x1E : project.VolumeType == VolumeType.PkgPs4App ? 0x1A : 0x1B));
         WriteBe32(hdr, 0x78, project.VolumeType == VolumeType.PkgPs4Patch ? 0x48000000u : 0x0A000000u);
+        // promote_size = pfs_image_offset — verified against original FPKGs
+        // (Children of Morta 0xD00000, Digimon 0xB00000, Disgaea 0x80000,
+        // Adventure Time 0x2780000 — always equals the PFS image offset).
+        WriteBe32(hdr, 0x7C, (uint)pfsOffset);
         WriteBe32(hdr, 0x80, 0x20161020);
         WriteBe32(hdr, 0x84, 0x01738551);
         WriteBe32(hdr, 0x98, 0);
@@ -915,6 +919,8 @@ public static class PkgBuilder
         WriteBe32(pkg, 0x70, 0x0000000F);
         WriteBe32(pkg, 0x74, (uint)(project.VolumeType == VolumeType.PkgPs4Patch ? 0x1E : project.VolumeType == VolumeType.PkgPs4App ? 0x1A : 0x1B));
         WriteBe32(pkg, 0x78, project.VolumeType == VolumeType.PkgPs4Patch ? 0x48000000u : 0x0A000000u);
+        // promote_size = pfs_image_offset (matches original FPKGs)
+        WriteBe32(pkg, 0x7C, (uint)pfsOffset);
         WriteBe32(pkg, 0x80, 0x20161020);
         WriteBe32(pkg, 0x84, 0x01738551);
         WriteBe32(pkg, 0x98, 0);

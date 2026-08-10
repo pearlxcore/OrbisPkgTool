@@ -250,6 +250,12 @@ try
         case "xtstest":
             RunXtsTest(ParseOptions(cmdArgs, out _).Pkg);
             break;
+        case "s4crypto":
+            Environment.ExitCode = Shad4CryptoTest.Run(ParseOptions(cmdArgs, out _).Pkg);
+            break;
+        case "pkgfields":
+            Environment.ExitCode = PkgFieldDump.Run(cmdArgs[1..]);
+            break;
         case "help":
         case "-h":
         case "--help":
