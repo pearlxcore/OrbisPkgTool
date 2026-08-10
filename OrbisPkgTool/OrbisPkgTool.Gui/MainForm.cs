@@ -346,6 +346,15 @@ public sealed class MainForm : Form
             return;
         }
 
+        // The CLI dispatches on cmdArgs[0] — the command word(s) must
+        // come BEFORE the flags. For sub-commands like "sfo read",
+        // split the CliWord so both tokens become leading args.
+        var cliWords = _current.CliWord.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var fullArgs = new string[cliWords.Length + args.Length];
+        Array.Copy(cliWords, 0, fullArgs, 0, cliWords.Length);
+        Array.Copy(args, 0, fullArgs, cliWords.Length, args.Length);
+        args = fullArgs;
+
         _cts = new CancellationTokenSource();
         _runButton.Enabled = false;
         _cancelButton.Enabled = true;
