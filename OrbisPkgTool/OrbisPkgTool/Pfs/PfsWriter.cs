@@ -97,7 +97,11 @@ public static class PfsWriter
         foreach (var f in fileNodes)
         {
             f.StartBlock = nextBlock;
-            nextBlock += CeilDiv(f.Data.Length, (int)BlockSize);
+            // Empty files must still occupy one block — allocating 0 blocks
+            // makes the next file share this StartBlock (block overlap).
+            long blocks = CeilDiv(f.Data.Length, (int)BlockSize);
+            if (blocks < 1) blocks = 1;
+            nextBlock += blocks;
         }
         long ndblock = nextBlock;
 
@@ -185,8 +189,10 @@ public static class PfsWriter
         foreach (var f in fileNodes)
         {
             NextInode();
+            long blocks = CeilDiv(f.Data.Length, (int)BlockSize);
+            if (blocks < 1) blocks = 1; // empty files still occupy one block
             WriteD32Inode(w, inodePos, 0x816D, 1, 0x00000010, f.Data.Length,
-                CeilDiv(f.Data.Length, (int)BlockSize), f.StartBlock);
+                blocks, f.StartBlock);
             inodePos += 0xA8;
         }
 
@@ -283,7 +289,11 @@ public static class PfsWriter
     public static byte[] BuildInnerPfs(List<(string Path, byte[] Data)> files, long fileTime)
     {
         // Estimate; fall back to a temp file for images that don't fit in a byte[].
-        long estSize = 6 * BlockSize + files.Sum(f => (long)CeilDiv(f.Data.Length, (int)BlockSize) * BlockSize);
+        long estSize = 6 * BlockSize + files.Sum(f =>
+        {
+            long blocks = CeilDiv(f.Data.Length, (int)BlockSize);
+            return Math.Max(1, blocks) * BlockSize;
+        });
         if (estSize <= int.MaxValue - 1024)
         {
             using var ms = new MemoryStream((int)estSize);
