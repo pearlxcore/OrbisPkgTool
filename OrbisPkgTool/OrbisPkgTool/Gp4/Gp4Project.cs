@@ -129,6 +129,10 @@ public sealed class Gp4Project
     public static Gp4Project FromFolder(string folder, bool isPatch, string? title = null,
         string? titleId = null, string? contentId = null, string passcode = "")
     {
+        // Read metadata from the embedded param.sfo if present and not
+        // overridden on the command line.
+        TryReadSfo(folder, ref title, ref titleId, ref contentId);
+
         var proj = new Gp4Project
         {
             VolumeType = isPatch ? VolumeType.PkgPs4Patch : VolumeType.PkgPs4App,
@@ -145,5 +149,32 @@ public sealed class Gp4Project
             proj.Files.Add((rel, rel));
         }
         return proj;
+    }
+
+    /// <summary>
+    /// Fills title / title-id / content-id from sce_sys/param.sfo when
+    /// the caller did not supply explicit overrides.
+    /// </summary>
+    private static void TryReadSfo(string folder, ref string? title, ref string? titleId, ref string? contentId)
+    {
+        // Standard locations after extract or restructure.
+        string[] candidates = [
+            Path.Combine(folder, "sce_sys", "param.sfo"),
+            Path.Combine(folder, "..", "Sc0", "param.sfo"),  // dump before restructure
+        ];
+        string? sfoPath = candidates.FirstOrDefault(File.Exists);
+        if (sfoPath == null) return;
+
+        try
+        {
+            var sfo = OrbisPkgTool.Sfo.ParamSfo.Parse(File.ReadAllBytes(sfoPath));
+            if (title == null)
+                title = sfo.Values.FirstOrDefault(v => v.Key == "TITLE")?.StringValue;
+            if (titleId == null)
+                titleId = sfo.Values.FirstOrDefault(v => v.Key == "TITLE_ID")?.StringValue;
+            if (contentId == null)
+                contentId = sfo.Values.FirstOrDefault(v => v.Key == "CONTENT_ID")?.StringValue;
+        }
+        catch { /* best-effort — missing or unreadable SFO is not fatal */ }
     }
 }
