@@ -948,6 +948,8 @@ static void RunPkgBuild(string[] args)
         args = args[1..];
     string? gp4 = null, folder = null, outFile = null, passcode = OrbisPkgTool.Pkg.PkgBuilder.DefaultPasscode;
     bool validate = false;
+    string pfscMode = "store";
+    string? manifest = null;
     for (int i = 0; i < args.Length; i++)
     {
         switch (args[i])
@@ -955,6 +957,8 @@ static void RunPkgBuild(string[] args)
             case "--passcode" when i + 1 < args.Length: passcode = args[++i]; break;
             case "--out" when i + 1 < args.Length: outFile = args[++i]; break;
             case "--validate": validate = true; break;
+            case "--pfsc-mode" when i + 1 < args.Length: pfscMode = args[++i]; break;
+            case "--manifest" when i + 1 < args.Length: manifest = args[++i]; break;
             default:
                 if (!args[i].StartsWith('-'))
                 {
@@ -966,7 +970,8 @@ static void RunPkgBuild(string[] args)
     }
     if (gp4 == null || !File.Exists(gp4))
     {
-        Console.Error.WriteLine("usage: pkg build <project.gp4> <source_folder> [--passcode X] [--out file.pkg] [--validate]");
+        Console.Error.WriteLine("usage: pkg build <project.gp4> <source_folder> [--passcode X] [--out file.pkg]");
+        Console.Error.WriteLine("       [--pfsc-mode store|compressed] [--manifest file.json] [--validate]");
         Environment.ExitCode = 2;
         return;
     }
@@ -975,12 +980,38 @@ static void RunPkgBuild(string[] args)
     try
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        OrbisPkgTool.Pkg.PkgBuilder.Build(gp4, folder, outFile, passcode);
+        using var cts = new System.Threading.CancellationTokenSource();
+        Console.CancelKeyPress += (s, e) => { e.Cancel = true; cts.Cancel(); };
+        var options = new OrbisPkgTool.Pkg.BuildOptions
+        {
+            Passcode = passcode,
+            PfscMode = pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase)
+                ? OrbisPkgTool.Pkg.PfscMode.Compressed : OrbisPkgTool.Pkg.PfscMode.Store,
+            Validate = validate,
+            ManifestPath = manifest,
+            CancellationToken = cts.Token,
+            Progress = (stage, done, total) =>
+            {
+                if (total <= 0) return;
+                int pct = (int)(100.0 * done / total);
+                string line = $"  [{pct,3}%] {stage} ({done / 1e6:F0}/{total / 1e6:F0} MB)";
+                int w = Math.Min(Console.WindowWidth - 1, 120);
+                if (line.Length < w) line += new string(' ', w - line.Length);
+                Console.Write($"\r{line}");
+            },
+        };
+        OrbisPkgTool.Pkg.PkgBuilder.Build(gp4, folder, outFile, options);
         sw.Stop();
+        Console.WriteLine();
         long size = new FileInfo(outFile).Length;
         Console.WriteLine($"Built {outFile} ({size / 1024.0 / 1024.0:F1} MB) in {sw.Elapsed.TotalSeconds:F1} s");
         if (validate)
             RunValidate(outFile, passcode);
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine("\n[error] Build cancelled. Temporary files cleaned up.");
+        Environment.ExitCode = 130;
     }
     catch (Exception ex)
     {

@@ -53,12 +53,16 @@ public static class PkgValidator
             if (!ids.Add(e.Id))
                 throw new ValidationFailure("1", "entry table", $"id 0x{e.Id:X8}",
                     "duplicate entry ID");
-            if (e.DataOffset < 0 || e.DataOffset + e.DataSize > pkgLen)
+            // Encrypted entries occupy the 16-aligned region on disk; the table
+            // DataSize itself is the LOGICAL size (verified: original Digimon
+            // npbind.dat = 532 with a 544-byte stored region).
+            long storedEnd = (long)e.DataOffset + (e.IsEncrypted ? (e.DataSize + 15) & ~15L : e.DataSize);
+            if (storedEnd > pkgLen)
                 throw new ValidationFailure("1", "entry table", $"id 0x{e.Id:X8}",
-                    $"entry range 0x{e.DataOffset:X}..0x{e.DataOffset + e.DataSize:X} outside package");
-            if (e.IsEncrypted && (e.DataSize & 15) != 0)
+                    $"entry range 0x{e.DataOffset:X}..0x{storedEnd:X} outside package");
+            if (e.IsEncrypted && (e.DataOffset & 15) != 0)
                 throw new ValidationFailure("1", "entry table", $"id 0x{e.Id:X8}",
-                    $"encrypted stored size {e.DataSize} not 16-aligned");
+                    $"encrypted data offset 0x{e.DataOffset:X} not 16-aligned");
         }
 
         // ---- Stage 2: outer PFS structure ----
@@ -106,23 +110,22 @@ public static class PkgValidator
         int inodeSize = h.Mode.HasFlag(PfsMode.Is64Bit) ? 0x310
             : h.Mode.HasFlag(PfsMode.Signed) ? PfsFormat.S32InodeSize : PfsFormat.D32InodeSize;
 
-        // Packing rule: no inode may straddle a block boundary.
-        for (long i = 0; i < h.DinodeCount; i++)
+        // Packing rule: inodes never straddle block boundaries — the reader
+        // (and orbis) skip to the next block when an inode does not fit.
+        // Detection: if a writer packed inodes contiguously, the skip-rule
+        // position would contain zeros instead of a real inode.
         {
-            long pos = PfsFormat.BlockSize + i * inodeSize; // ideal contiguous position
-            // The reader skips to the next block when an inode does not fit;
-            // recompute the true offset the same way.
             long off = PfsFormat.BlockSize;
-            for (long j = 0; j < i; j++)
+            for (long i = 0; i < h.DinodeCount; i++)
             {
                 if (off % PfsFormat.BlockSize > PfsFormat.BlockSize - inodeSize)
                     off += PfsFormat.BlockSize - (off % PfsFormat.BlockSize);
+                var ino = pfs.GetInode((uint)i);
+                if (ino == null || ino.Mode == 0)
+                    throw new ValidationFailure("pfs", what, $"inode {i}",
+                        "inode not at skip-rule position (straddled a block boundary?)");
                 off += inodeSize;
             }
-            if (off % PfsFormat.BlockSize + inodeSize > PfsFormat.BlockSize)
-                throw new ValidationFailure("pfs", what, $"inode {i}",
-                    "inode straddles a block boundary");
-            _ = pos;
         }
 
         // Collect all referenced data blocks; bounds + overlap.
@@ -174,9 +177,11 @@ public static class PkgValidator
         long dataOff = BitConverter.ToInt64(hdr, 0x20);
         long rounded = BitConverter.ToInt64(hdr, 0x28);
         long pfscLen = pfsc.Length;
-        if (dataOff != PfsFormat.PfscDataOffset)
+        // dataOffset must be block-aligned at or after 0x10000, and must clear
+        // the block table (large PFSCs legitimately use 0x20000+).
+        if (dataOff < PfsFormat.PfscDataOffset || dataOff % PfsFormat.BlockSize != 0)
             throw new ValidationFailure("pfsc", "header", "0x20",
-                $"dataOffset 0x{dataOff:X} not {PfsFormat.PfscDataOffset:X} (block-aligned)");
+                $"dataOffset 0x{dataOff:X} must be block-aligned at or after {PfsFormat.PfscDataOffset:X}");
         if (tableOff < 0x30 || tableOff + 8 > pfscLen)
             throw new ValidationFailure("pfsc", "header", "0x18", "table offset outside file");
         if (rounded <= 0 || rounded % PfsFormat.BlockSize != 0)
@@ -186,6 +191,9 @@ public static class PkgValidator
         int blockCount = (int)((rounded + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize);
         long prev = -1;
         long tableEnd = tableOff + (blockCount + 1) * PfsFormat.PfscTableEntrySize;
+        if (tableEnd > dataOff)
+            throw new ValidationFailure("pfsc", "table", "0x18",
+                $"block table (ends 0x{tableEnd:X}) overlaps the data region (starts 0x{dataOff:X})");
         if (tableEnd > pfscLen)
             throw new ValidationFailure("pfsc", "table", "0x18", "table extends past file end");
         var entry = new byte[8];

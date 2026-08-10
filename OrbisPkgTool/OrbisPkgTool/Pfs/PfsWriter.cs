@@ -26,7 +26,8 @@ public static class PfsWriter
     /// then dir dirent blocks, then contiguous file data.
     /// </summary>
     /// <summary>Builds the inner PFS into the given stream (supports >2GB).</summary>
-    public static void BuildInnerPfsToStream(List<(string Path, byte[] Data)> files, long fileTime, Stream output)
+    public static void BuildInnerPfsToStream(List<(string Path, byte[] Data)> files, long fileTime, Stream output,
+        System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
     {
         files = files.OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase).ToList();
 
@@ -267,10 +268,15 @@ public static class PfsWriter
             foreach (var f in d.Files)
                 WriteDirent(w, ref dpos, f.Number, PfsDirentType.File, f.Name);
         }
+        long dataTotal = fileNodes.Sum(f => (long)f.Data.Length);
+        long dataDone = 0;
         foreach (var f in fileNodes)
         {
+            ct.ThrowIfCancellationRequested();
             output.Position = f.StartBlock * BlockSize;
             output.Write(f.Data, 0, f.Data.Length);
+            dataDone += f.Data.Length;
+            progress?.Invoke(dataDone, dataTotal);
         }
     }
 
@@ -410,7 +416,8 @@ public static class PfsWriter
 
     /// <summary>Outer PFS builder for images that don't fit in a byte[] (stream based).</summary>
     public static void BuildOuterPfsToStream(Stream fileData, string fileName, byte[] ekpfs, byte[] seed,
-        long fileTime, Stream output)
+        long fileTime, Stream output, System.Threading.CancellationToken ct = default,
+        Action<long, long>? progress = null)
     {
         long dataBlocks = CeilDiv(fileData.Length, (int)BlockSize);
         long indirect1 = dataBlocks > 12 ? 1 : 0;
@@ -508,8 +515,11 @@ public static class PfsWriter
             new PfsHeader { Mode = PfsMode.Signed | PfsMode.Encrypted | PfsMode.UnknownFlagAlwaysSet, Seed = seed },
             ekpfs);
         var sector = new byte[XtsSectorSize];
+        long totalSectors = (ndblock - 1) * 16;
+        long sectorDone = 0;
         for (long s = 16; s < ndblock * 16; s++)
         {
+            ct.ThrowIfCancellationRequested();
             long blk = s / 16;
             if (blk == emptyBlock) continue; // empty block stays plaintext
             output.Position = s * XtsSectorSize;
@@ -517,7 +527,11 @@ public static class PfsWriter
             PfsReader.XtsEncryptSector(sector, 0, (ulong)s, dataKey!, tweakKey!);
             output.Position = s * XtsSectorSize;
             output.Write(sector, 0, XtsSectorSize);
+            sectorDone++;
+            if ((sectorDone & 0x3FF) == 0)
+                progress?.Invoke(sectorDone * XtsSectorSize, totalSectors * XtsSectorSize);
         }
+        progress?.Invoke(totalSectors * XtsSectorSize, totalSectors * XtsSectorSize);
     }
 
     /// <summary>Shared signing pass for the byte[] outer PFS.</summary>

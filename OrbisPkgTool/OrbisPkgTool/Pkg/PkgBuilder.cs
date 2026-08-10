@@ -26,7 +26,12 @@ public static class PkgBuilder
     /// </summary>
     public static void Build(string gp4Path, string projectFolder, string outputPath,
         string passcode = DefaultPasscode)
+        => Build(gp4Path, projectFolder, outputPath, new BuildOptions { Passcode = passcode });
+
+    /// <summary>Builds a PKG with full options (PFSC mode, validation, progress, cancellation, manifest).</summary>
+    public static void Build(string gp4Path, string projectFolder, string outputPath, BuildOptions options)
     {
+        string passcode = options.Passcode;
         var project = Gp4Project.Parse(File.ReadAllText(gp4Path));
 
         // Separate Image0 (inner PFS) from Sc0 (PKG entries) based on source path
@@ -58,24 +63,42 @@ public static class PkgBuilder
         for (uint i = 0; i < 7; i++) dk[i] = PkgCrypto.DeriveKey(project.ContentId, passcode, i);
 
         // Large games: stream everything through temp files (byte[] limited to 2GB)
-        if (totalSize > 1_000_000_000L)
+        if (totalSize > PfsFormat.StreamingThreshold)
         {
-            BuildLarge(project, pfsFiles, sc0Files, dk, passcode, outputPath);
+            BuildLarge(project, pfsFiles, sc0Files, dk, passcode, outputPath, options);
             return;
         }
 
+        options.CancellationToken.ThrowIfCancellationRequested();
         var inner = PfsWriter.BuildInnerPfs(pfsFiles, 0);
-        var pfsc = PFSCWriter.Build(inner, storeAllRaw: true);
+        var pfsc = PFSCWriter.Build(inner, storeAllRaw: options.PfscMode != PfscMode.Compressed);
         var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0);
 
         var pkg = Assemble(project, pfsFiles, outer, passcode, dk, inner.Length, sc0Files);
         File.WriteAllBytes(outputPath, pkg);
+        if (options.Validate)
+            PkgValidator.ValidatePkgFile(outputPath, passcode);
+        if (options.ManifestPath != null)
+            WriteManifest(options.ManifestPath, project, pfsFiles, sc0Files, inner.Length, pfsc.Length, outer.Length,
+                pkg.Length, dk, passcode, outputPath, options);
     }
 
     /// <summary>Streams the build through temp files for games whose inner PFS exceeds 2 GB.</summary>
     private static void BuildLarge(Gp4Project project, List<(string Path, byte[] Data)> pfsFiles,
-        List<(string Path, byte[] Data)> sc0Files, byte[][] dk, string passcode, string outputPath)
+        List<(string Path, byte[] Data)> sc0Files, byte[][] dk, string passcode, string outputPath,
+        BuildOptions options)
     {
+        var ct = options.CancellationToken;
+
+        // Pre-flight disk-space estimate (temp pipeline is ~3.2× inner + output).
+        long estInner = pfsFiles.Sum(f => (f.Data.Length + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize * PfsFormat.BlockSize);
+        long required = (long)(estInner * PfsFormat.TempDiskMultiplier) + estInner / 4;
+        var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(outputPath)) ?? ".");
+        if (drive.AvailableFreeSpace < required)
+            throw new InvalidOperationException(
+                $"Estimated temporary disk requirement: {required / 1e9:F1} GB. " +
+                $"Available on {drive.Name}: {drive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
+
         string tmpDir = Path.Combine(Path.GetTempPath(), $"pkgbuild_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tmpDir);
         string innerPath = Path.Combine(tmpDir, "inner.pfs");
@@ -84,28 +107,38 @@ public static class PkgBuilder
         try
         {
             // 1. Inner PFS → file
-            Console.Error.WriteLine("[build] stage 1: inner PFS");
             using (var innerFs = new FileStream(innerPath, FileMode.Create, FileAccess.ReadWrite))
-                PfsWriter.BuildInnerPfsToStream(pfsFiles, 0, innerFs);
+                PfsWriter.BuildInnerPfsToStream(pfsFiles, 0, innerFs, ct,
+                    (done, total) => options.Progress?.Invoke(BuildStage.InnerPfs, done, total));
             long innerSize = new FileInfo(innerPath).Length;
-            Console.Error.WriteLine($"[build] inner PFS: {innerSize} bytes");
+            options.Progress?.Invoke(BuildStage.InnerPfs, innerSize, innerSize);
 
-            // 2. PFSC (all raw) → file
-            Console.Error.WriteLine("[build] stage 2: PFSC");
+            // 2. PFSC → file
             using (var innerIn = new FileStream(innerPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var pfscFs = new FileStream(pfscPath, FileMode.Create, FileAccess.ReadWrite))
-                PFSCWriter.BuildToStream(innerIn, pfscFs, storeAllRaw: true);
+                PFSCWriter.BuildToStream(innerIn, pfscFs,
+                    storeAllRaw: options.PfscMode != PfscMode.Compressed, ct,
+                    (done, total) => options.Progress?.Invoke(BuildStage.Pfsc, done, total));
 
-            // 3. Outer PFS → file
-            Console.Error.WriteLine("[build] stage 3: outer PFS");
+            // 3. Outer PFS → file (signing + XTS)
             using (var pfscIn = new FileStream(pfscPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var outerFs = new FileStream(outerPath, FileMode.Create, FileAccess.ReadWrite))
-                PfsWriter.BuildOuterPfsToStream(pfscIn, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, outerFs);
+                PfsWriter.BuildOuterPfsToStream(pfscIn, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, outerFs, ct,
+                    (done, total) => options.Progress?.Invoke(BuildStage.OuterPfs, done, total));
 
             // 4. Assemble PKG → output file
-            Console.Error.WriteLine("[build] stage 4: assemble");
-            try { AssembleToFile(project, pfsFiles, outerPath, passcode, dk, innerSize, sc0Files, outputPath); }
-            catch (Exception ex) { Console.Error.WriteLine($"[build] ASSEMBLE: {ex.Message}\n{ex.StackTrace}"); throw; }
+            AssembleToFile(project, pfsFiles, outerPath, passcode, dk, innerSize, sc0Files, outputPath, ct,
+                (done, total) => options.Progress?.Invoke(BuildStage.Assemble, done, total));
+
+            if (options.Validate)
+                PkgValidator.ValidatePkgFile(outputPath, passcode);
+            if (options.ManifestPath != null)
+            {
+                long outerSize = new FileInfo(outerPath).Length;
+                long pfscSize = new FileInfo(pfscPath).Length;
+                WriteManifest(options.ManifestPath, project, pfsFiles, sc0Files, innerSize, pfscSize, outerSize,
+                    new FileInfo(outputPath).Length, dk, passcode, outputPath, options);
+            }
         }
         finally
         {
@@ -113,9 +146,56 @@ public static class PkgBuilder
         }
     }
 
+    /// <summary>Writes the optional build manifest (build.json).</summary>
+    private static void WriteManifest(string path, Gp4Project project, List<(string Path, byte[] Data)> pfsFiles,
+        List<(string Path, byte[] Data)> sc0Files, long innerPfsSize, long pfscSize, long outerPfsSize,
+        long pkgSize, byte[][] dk, string passcode, string outputPath, BuildOptions options)
+    {
+        int dirCount = pfsFiles.Select(f => f.Path.Contains('/') ? f.Path[..f.Path.LastIndexOf('/')] : "")
+            .Where(d => d.Length > 0).Distinct().Count();
+        int inodeCount = 3 + dirCount + pfsFiles.Count;
+        int inodeBlocks = (int)((inodeCount * PfsFormat.D32InodeSize + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize);
+        int sc0Count = sc0Files.Count + 13; // fixed system entries + provided Sc0 files
+
+        byte[] sha256;
+        using (var sha = SHA256.Create())
+        using (var fs = File.OpenRead(outputPath))
+        {
+            var buf = new byte[1 << 20];
+            int n;
+            while ((n = fs.Read(buf, 0, buf.Length)) > 0) sha.TransformBlock(buf, 0, n, null, 0);
+            sha.TransformFinalBlock([], 0, 0);
+            sha256 = sha.Hash!;
+        }
+
+        var manifest = new System.Text.Json.Nodes.JsonObject
+        {
+            ["tool"] = "OrbisPkgTool",
+            ["version"] = typeof(PkgBuilder).Assembly.GetName().Version?.ToString() ?? "0.0.0",
+            ["buildTimestamp"] = DateTime.UtcNow.ToString("o"),
+            ["contentId"] = project.ContentId,
+            ["titleId"] = project.TitleId,
+            ["title"] = project.Title,
+            ["packageType"] = project.VolumeType.ToString(),
+            ["pfscMode"] = options.PfscMode.ToString(),
+            ["fileCount"] = pfsFiles.Count,
+            ["directoryCount"] = dirCount,
+            ["innerPfsSize"] = innerPfsSize,
+            ["pfscSize"] = pfscSize,
+            ["outerPfsSize"] = outerPfsSize,
+            ["pkgSize"] = pkgSize,
+            ["inodeCount"] = inodeCount,
+            ["inodeBlockCount"] = inodeBlocks,
+            ["sc0EntryCount"] = sc0Count,
+            ["sha256"] = Convert.ToHexString(sha256),
+        };
+        File.WriteAllText(path, manifest.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+    }
+
     private static void AssembleToFile(Gp4Project project, List<(string Path, byte[] Data)> files,
         string outerPfsPath, string passcode, byte[][] dk, long innerPfsSize,
-        List<(string Path, byte[] Data)>? sc0Files, string outputPath)
+        List<(string Path, byte[] Data)>? sc0Files, string outputPath,
+        System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
     {
         // Build the entry list + table in memory (entry data is small).
         var entries = BuildAssembleEntries(project, files, passcode, dk, innerPfsSize, sc0Files);
@@ -156,10 +236,11 @@ public static class PkgBuilder
                 case PkgEntryIds.Metas: e.DataOffset = TableOffset; e.DataSize = (uint)(count * 32); continue;
                 default:
                     e.DataOffset = nextOffset;
-                    // Encrypted entries are stored at their 16-aligned size
-                    e.DataSize = e.Encrypted
-                        ? (uint)((e.Data.Length + 15) & ~15)
-                        : (uint)e.Data.Length;
+                    // Table DataSize = LOGICAL size (verified: the original
+                    // Digimon stores npbind.dat as 532, not 544). Encrypted
+                    // entries occupy the 16-aligned region on disk — the
+                    // offset-advance below aligns it.
+                    e.DataSize = (uint)e.Data.Length;
                     break;
             }
             nextOffset += e.DataSize;
@@ -178,16 +259,12 @@ public static class PkgBuilder
                 PkgEntryIds.GeneralDigests => 0x60000000,
                 PkgEntryIds.Metas => 0x60000000,
                 PkgEntryIds.EntryNames => 0x40000000,
-                PkgEntryIds.LicenseDat => 0x80000000,
-                PkgEntryIds.LicenseInfo => 0x80000000,
-                _ => 0u,
+                _ => e.Encrypted ? 0x80000000u : 0u,
             };
             uint flags2 = e.Id switch
             {
                 PkgEntryIds.ImageKey => 3u << 12,
-                PkgEntryIds.LicenseDat => 3u << 12,
-                PkgEntryIds.LicenseInfo => 2u << 12,
-                _ => 0u,
+                _ => e.Encrypted ? (uint)(e.KeyIndex << 12) : 0u,
             };
             WriteBe32(table, i * 32 + 0, e.Id);
             WriteBe32(table, i * 32 + 4, e.Name != null && nameOffsets.TryGetValue(e.Name, out var no) ? (uint)no : 0);
@@ -207,11 +284,9 @@ public static class PkgBuilder
             if (e.Encrypted)
             {
                 var ivKey = EntryIvKey(table, entries.IndexOf(e), dk[e.KeyIndex]);
+                // EncryptAesCbc returns the FULL padded ciphertext (16-aligned);
+                // the table DataSize stays the LOGICAL size (see offset pass).
                 e.Data = PkgCrypto.EncryptAesCbc(ivKey.Key, ivKey.Iv, e.Data, e.Data.Length);
-                // PKG stores encrypted entries at 16-aligned size
-                e.DataSize = (uint)((e.Data.Length + 15) & ~15);
-                if (e.Data.Length < e.DataSize)
-                    Array.Resize(ref e.Data, (int)e.DataSize);
             }
         }
         var imageKeyEntry = entries.First(e => e.Id == PkgEntryIds.ImageKey);
@@ -256,7 +331,16 @@ public static class PkgBuilder
         using (var outer = new FileStream(outerPfsPath, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             pkg.Position = pfsOffset;
-            outer.CopyTo(pkg);
+            var copyBuf = new byte[1 << 20];
+            long copied = 0;
+            int cn;
+            while ((cn = outer.Read(copyBuf, 0, copyBuf.Length)) > 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                pkg.Write(copyBuf, 0, cn);
+                copied += cn;
+                progress?.Invoke(copied, outerSize);
+            }
         }
 
         // Header (0x1000) + RSA signature (0x1000..0x1100) — the in-memory
@@ -391,13 +475,14 @@ public static class PkgBuilder
         {
             if (!ids.Add(e.Id))
                 throw new InvalidOperationException($"Duplicate entry ID 0x{e.Id:X8} in entry table");
-            long eEnd = (long)e.DataOffset + e.DataSize;
+            // Encrypted entries occupy the 16-aligned region on disk.
+            long eEnd = (long)e.DataOffset + (e.Encrypted ? (e.DataSize + 15) & ~15L : e.DataSize);
             if (eEnd > pkgSize)
                 throw new InvalidOperationException(
                     $"Entry 0x{e.Id:X8} range 0x{e.DataOffset:X}..0x{eEnd:X} outside package (size 0x{pkgSize:X})");
-            if (e.Encrypted && (e.DataSize & 15) != 0)
+            if (e.Encrypted && (e.DataOffset & 15) != 0)
                 throw new InvalidOperationException(
-                    $"Entry 0x{e.Id:X8} encrypted stored size {e.DataSize} is not 16-aligned");
+                    $"Entry 0x{e.Id:X8} encrypted data offset 0x{e.DataOffset:X} is not 16-aligned");
         }
     }
 
@@ -720,10 +805,11 @@ public static class PkgBuilder
                 case PkgEntryIds.Metas: e.DataOffset = TableOffset; e.DataSize = (uint)(count * 32); continue;
                 default:
                     e.DataOffset = nextOffset;
-                    // Encrypted entries are stored at their 16-aligned size
-                    e.DataSize = e.Encrypted
-                        ? (uint)((e.Data.Length + 15) & ~15)
-                        : (uint)e.Data.Length;
+                    // Table DataSize = LOGICAL size (verified: the original
+                    // Digimon stores npbind.dat as 532, not 544). Encrypted
+                    // entries occupy the 16-aligned region on disk — the
+                    // offset-advance below aligns it.
+                    e.DataSize = (uint)e.Data.Length;
                     break;
             }
             nextOffset += e.DataSize;
@@ -743,16 +829,12 @@ public static class PkgBuilder
                 PkgEntryIds.GeneralDigests => 0x60000000,
                 PkgEntryIds.Metas => 0x60000000,
                 PkgEntryIds.EntryNames => 0x40000000,
-                PkgEntryIds.LicenseDat => 0x80000000,
-                PkgEntryIds.LicenseInfo => 0x80000000,
-                _ => 0u,
+                _ => e.Encrypted ? 0x80000000u : 0u,
             };
             uint flags2 = e.Id switch
             {
                 PkgEntryIds.ImageKey => 3u << 12,
-                PkgEntryIds.LicenseDat => 3u << 12,
-                PkgEntryIds.LicenseInfo => 2u << 12,
-                _ => 0u,
+                _ => e.Encrypted ? (uint)(e.KeyIndex << 12) : 0u,
             };
             WriteBe32(table, i * 32 + 0, e.Id);
             WriteBe32(table, i * 32 + 4, e.Name != null && nameOffsets.TryGetValue(e.Name, out var no) ? (uint)no : 0);
@@ -774,11 +856,9 @@ public static class PkgBuilder
             if (e.Encrypted)
             {
                 var ivKey = EntryIvKey(table, entries.IndexOf(e), dk[e.KeyIndex]);
+                // EncryptAesCbc returns the FULL padded ciphertext (16-aligned);
+                // the table DataSize stays the LOGICAL size (see offset pass).
                 e.Data = PkgCrypto.EncryptAesCbc(ivKey.Key, ivKey.Iv, e.Data, e.Data.Length);
-                // PKG stores encrypted entries at 16-aligned size
-                e.DataSize = (uint)((e.Data.Length + 15) & ~15);
-                if (e.Data.Length < e.DataSize)
-                    Array.Resize(ref e.Data, (int)e.DataSize);
             }
         }
         var imageKeyEntry = entries.First(e => e.Id == PkgEntryIds.ImageKey);

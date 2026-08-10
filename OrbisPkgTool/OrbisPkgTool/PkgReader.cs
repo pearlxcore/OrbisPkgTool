@@ -547,9 +547,14 @@ public sealed class PkgReader : IDisposable
 
     private byte[] ReadEntryData(PkgEntry e)
     {
-        if (e.DataOffset + e.DataSize > _stream.Length)
+        // Encrypted entries store the FULL 16-aligned ciphertext region while
+        // the table DataSize is the LOGICAL size (verified: the original
+        // Digimon's npbind.dat is 532 with 544 stored bytes). Reading only
+        // DataSize would truncate the last AES block and corrupt the tail.
+        long stored = e.IsEncrypted ? (e.DataSize + 15) & ~15L : e.DataSize;
+        if (e.DataOffset + stored > _stream.Length)
             throw new InvalidDataException("Entry data is out of bounds.");
-        byte[] data = _reader.ReadBytesAt(e.DataOffset, (int)e.DataSize);
+        byte[] data = _reader.ReadBytesAt(e.DataOffset, (int)stored);
         if (e.IsEncrypted)
         {
             var dk = _derivedKeys[e.KeyIndex & 7];
