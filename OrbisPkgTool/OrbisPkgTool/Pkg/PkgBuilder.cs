@@ -75,6 +75,7 @@ public static class PkgBuilder
         }
 
         options.CancellationToken.ThrowIfCancellationRequested();
+
         var inner = PfsWriter.BuildInnerPfs(pfsFiles, 0);
         var pfsc = PFSCWriter.Build(inner, storeAllRaw: options.PfscMode != PfscMode.Compressed);
         var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, out long outerDataStartMem);
