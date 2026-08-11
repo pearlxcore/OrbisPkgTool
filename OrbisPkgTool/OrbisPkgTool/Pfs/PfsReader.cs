@@ -319,11 +319,21 @@ public sealed class PfsReader
         // the block list itself is bounded by ino.Blocks. dir.Size is the
         // ROUNDED allocation (blocks * 0x10000), NOT a dirent byte budget, so
         // it must not be used to stop the walk mid-directory.
-        foreach (int block in EnumerateBlocks(dir))
+        //
+        // Sony packs a multi-block dir as ONE CONTIGUOUS dirent stream: entries
+        // may STRADDLE block boundaries (the name continues in the next block).
+        // Our own writer (and LibOrbisPkg) instead never straddle and zero-pad
+        // each block tail. Both layouts are handled: per-block parsing starts at
+        // offset 0, and a dirent whose name would cross the block end has its
+        // continuation spliced from the next block.
+        var blocks = EnumerateBlocks(dir).Where(b => b > 0).ToList();
+        byte[]? pending = null;   // next block already loaded for a splice
+        int pendingOff = 0;       // where parsing continues inside it
+        for (int bi = 0; bi < blocks.Count; bi++)
         {
-            if (block <= 0) break;
-            byte[] data = ReadBlock(block);
-            int off = 0;
+            byte[] data = pending ?? ReadBlock(blocks[bi]);
+            int off = pending != null ? pendingOff : 0;
+            pending = null;
             while (off + 16 <= data.Length)
             {
                 uint inodeNumber = ReadLe32(data, off);
@@ -332,7 +342,27 @@ public sealed class PfsReader
                 int entSize = ReadLe32Signed(data, off + 12);
                 if (entSize < 16 + nameLength || entSize > 0x400 || nameLength < 0 || nameLength > 0x400)
                     break; // padding or corrupt
-                string name = System.Text.Encoding.ASCII.GetString(data, off + 16, nameLength)
+                string name;
+                if (off + 16 + nameLength > data.Length)
+                {
+                    // Dirent straddles the block boundary — splice the name from
+                    // the continuation block (Sony contiguous-stream layout).
+                    int firstPart = data.Length - (off + 16);
+                    var nameBytes = new byte[nameLength];
+                    Array.Copy(data, off + 16, nameBytes, 0, firstPart);
+                    byte[] next = bi + 1 < blocks.Count ? ReadBlock(blocks[bi + 1])
+                        : new byte[nameLength - firstPart];
+                    int take = Math.Min(nameLength - firstPart, next.Length);
+                    Array.Copy(next, 0, nameBytes, firstPart, take);
+                    name = System.Text.Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
+                    // The next dirent starts after this entry's name remainder +
+                    // padding inside the continuation block.
+                    pending = next;
+                    pendingOff = entSize - 16 - firstPart;
+                    result.Add(new PfsDirent(inodeNumber, type, name));
+                    break;
+                }
+                name = System.Text.Encoding.ASCII.GetString(data, off + 16, nameLength)
                     .TrimEnd('\0'); // PFS names are null-terminated
                 result.Add(new PfsDirent(inodeNumber, type, name));
                 off += entSize;

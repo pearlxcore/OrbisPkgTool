@@ -295,7 +295,7 @@ try
 catch (Exception ex)
 {
     Console.Error.WriteLine($"[error] {ex.Message}");
-    if (ex.StackTrace != null) Console.Error.WriteLine(ex.StackTrace.Split('\n').Take(6));
+    if (ex.StackTrace != null) Console.Error.WriteLine(string.Join('\n', ex.StackTrace.Split('\n').Take(8)));
     Environment.ExitCode = 1;
 }
 
@@ -959,6 +959,16 @@ static void RunRepack(string[] args)
         var buildArgs = new List<string> { gp4Path, image0Dir, "--out", outFile, "--passcode", passcode };
         if (pfscMode != "store") { buildArgs.Add("--pfsc-mode"); buildArgs.Add(pfscMode); }
         RunPkgBuild(buildArgs.ToArray());
+        // A failed build (e.g. OutOfMemory on huge games) leaves NO output file —
+        // stop immediately instead of throwing a confusing secondary error.
+        if (Environment.ExitCode != 0 || !File.Exists(outFile))
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("[error] PKG build failed. Output package was not created.");
+            Console.Error.WriteLine($"Work dir kept for debugging: {workDir}");
+            Environment.ExitCode = Environment.ExitCode == 0 ? 1 : Environment.ExitCode;
+            return;
+        }
         var pkgSize = new FileInfo(outFile).Length;
         Console.WriteLine($"  Output: {outFile} ({pkgSize / 1024.0 / 1024.0:F1} MB)");
 

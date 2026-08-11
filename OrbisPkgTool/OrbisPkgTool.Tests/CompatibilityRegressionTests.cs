@@ -317,6 +317,98 @@ public class CompatibilityRegressionTests : IDisposable
         Assert.True(reader.ListFiles().Any(f => f.Path == "Image0/big.bin" && f.Size == size));
     }
 
+    // ── 10b. Streaming PFSC (single-pass) byte-identical to the memory builder ──
+
+    [Fact]
+    public void PfscStreaming_MatchesMemoryBuilder_ByteIdentical()
+    {
+        var pfs = Data(3 * 65536 + 12345, 0x55);
+        var mem = OrbisPkgTool.Pfs.PFSCWriter.Build(pfs, storeAllRaw: false);
+        using var ms = new MemoryStream();
+        using (var inMs = new MemoryStream(pfs))
+            OrbisPkgTool.Pfs.PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: false);
+        var streamed = ms.ToArray();
+        Assert.Equal(Sha(mem), Sha(streamed));
+        Assert.Equal(mem.Length, streamed.Length);
+    }
+
+    [Fact]
+    public void PfscStreaming_Raw_MatchesMemoryBuilder_ByteIdentical()
+    {
+        // Block-aligned image: the memory builder pads a partial last block to
+        // 64 KiB while the stream builder stores exact bytes — for aligned
+        // images both must be byte-identical.
+        var pfs = Data(2 * 65536, 0x5A);
+        var mem = OrbisPkgTool.Pfs.PFSCWriter.Build(pfs, storeAllRaw: true);
+        using var ms = new MemoryStream();
+        using (var inMs = new MemoryStream(pfs))
+            OrbisPkgTool.Pfs.PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: true);
+        var streamed = ms.ToArray();
+        Assert.Equal(Sha(mem), Sha(streamed));
+        Assert.Equal(mem.Length, streamed.Length);
+    }
+
+    [Fact]
+    public void PfscStreaming_Raw_RoundTrips()
+    {
+        // Real inner PFS images are always block-aligned (ndblock * 0x10000);
+        // a raw PFSC of an aligned image must roundtrip exactly.
+        var pfs = Data(3 * 65536, 0x5A);
+        using var ms = new MemoryStream();
+        using (var inMs = new MemoryStream(pfs))
+            OrbisPkgTool.Pfs.PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: true);
+        var pfsc = ms.ToArray();
+        using var stream = new OrbisPkgTool.Pfs.PFSCStream(new MemoryStream(pfsc));
+        using var outMs = new MemoryStream();
+        stream.CopyTo(outMs);
+        var outBytes = outMs.ToArray();
+        Assert.Equal(pfs.Length, outBytes.Length);
+        Assert.Equal(Sha(pfs), Sha(outBytes));
+    }
+
+    // ── 10c. Disk-backed source descriptors produce byte-identical inner PFS ──
+
+    [Fact]
+    public void InnerPfs_DiskBackedSources_ByteIdenticalToMemory()
+    {
+        var files = new (string Path, byte[] Data)[]
+        {
+            ("eboot.bin", Data(123456, 0x11)),
+            ("CONTENT/DLC00/a.arc", Data(300000, 0x22)),
+            ("CONTENT/DLC00/b.arc", Data(0, 0x33)),           // empty file
+            ("LANGUAGE/EN/TITLE/TEXT/x.xml", Data(70000, 0x44)),
+            ("sce_sys/keystone", Data(4096, 0x55)),           // in-PFS sce_sys file
+        };
+        // Memory path
+        using var memMs = new MemoryStream();
+        OrbisPkgTool.Pfs.PfsWriter.BuildInnerPfsToStream(files.ToList(), 0, memMs);
+        var memBytes = memMs.ToArray();
+
+        // Disk path: write the fixture files to a temp dir, use descriptors
+        string tmp = Path.Combine(Path.GetTempPath(), "pfsparity_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            var descs = new List<OrbisPkgTool.Pfs.PfsSourceFile>();
+            foreach (var (p, d) in files)
+            {
+                string src = Path.Combine(tmp, p.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(src)!);
+                File.WriteAllBytes(src, d);
+                descs.Add(new OrbisPkgTool.Pfs.PfsSourceFile(p, src, d.Length));
+            }
+            using var diskMs = new MemoryStream();
+            OrbisPkgTool.Pfs.PfsWriter.BuildInnerPfsToStream(descs, 0, diskMs);
+            var diskBytes = diskMs.ToArray();
+            Assert.Equal(Sha(memBytes), Sha(diskBytes));
+            Assert.Equal(memBytes.Length, diskBytes.Length);
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
+        }
+    }
+
     // ── 11. Invariants fail fast ──
 
     [Fact]

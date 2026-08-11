@@ -34,8 +34,12 @@ public static class PkgBuilder
         string passcode = options.Passcode;
         var project = Gp4Project.Parse(File.ReadAllText(gp4Path));
 
-        // Separate Image0 (inner PFS) from Sc0 (PKG entries) based on source path
-        var pfsFiles = new List<(string Path, byte[] Data)>();
+        // Separate Image0 (inner PFS) from Sc0 (PKG entries) based on source path.
+        // Source files are collected as DISK-BACKED DESCRIPTORS (path + length)
+        // — file contents are never preloaded, so a 30 GB game cannot exhaust
+        // RAM before the build even starts (previously File.ReadAllBytes ran
+        // for every file BEFORE the streaming-threshold decision).
+        var pfsFiles = new List<PfsSourceFile>();
         var sc0Files = new List<(string Path, byte[] Data)>();
         long totalSize = 0;
         foreach (var f in project.Files)
@@ -43,21 +47,27 @@ public static class PkgBuilder
             if (f.TargPath == "sce_sys/param.sfo") continue;
             string src = ResolveSource(projectFolder, f.OrigPath);
             if (!File.Exists(src)) continue;
-            byte[] data = File.ReadAllBytes(src);
-            totalSize += data.Length;
+            long len = new FileInfo(src).Length;
+            totalSize += len;
             if (f.TargPath.StartsWith("sce_sys/", StringComparison.OrdinalIgnoreCase))
-                sc0Files.Add((f.TargPath["sce_sys/".Length..], data));
+            {
+                // Sc0 files are small (KB-MB); keep the memory-backed list.
+                sc0Files.Add((f.TargPath["sce_sys/".Length..], File.ReadAllBytes(src)));
+            }
             else
             {
                 string pfsPath = f.TargPath.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase)
                     ? f.TargPath["Image0/".Length..] : f.TargPath;
-                pfsFiles.Add((pfsPath, data));
+                pfsFiles.Add(new PfsSourceFile(pfsPath, src, len));
             }
         }
 
         if (project.VolumeType == VolumeType.PkgPs4App &&
-            !pfsFiles.Any(f => f.Path.Equals("sce_sys/keystone", StringComparison.OrdinalIgnoreCase)))
-            pfsFiles.Add(("sce_sys/keystone", PkgCrypto.CreateKeystone(passcode)));
+            !pfsFiles.Any(f => f.TargetPath.Equals("sce_sys/keystone", StringComparison.OrdinalIgnoreCase)))
+        {
+            byte[] keystone = PkgCrypto.CreateKeystone(passcode);
+            pfsFiles.Add(new PfsSourceFile("sce_sys/keystone", "", keystone.Length) { Data = keystone });
+        }
 
         // Mirror orbis-pub-cmd: scan the filesystem sce_sys/ for extra files
         // that are NOT in the GP4 and add them as Sc0 entries. (Verified:
@@ -67,7 +77,8 @@ public static class PkgBuilder
         var dk = new byte[7][];
         for (uint i = 0; i < 7; i++) dk[i] = PkgCrypto.DeriveKey(project.ContentId, passcode, i);
 
-        // Large games: stream everything through temp files (byte[] limited to 2GB)
+        // Large games: stream everything through temp files (byte[] limited to 2GB).
+        // The decision now happens on FILE LENGTHS before any content is loaded.
         if (totalSize > PfsFormat.StreamingThreshold)
         {
             BuildLarge(project, pfsFiles, sc0Files, dk, passcode, outputPath, options);
@@ -76,28 +87,33 @@ public static class PkgBuilder
 
         options.CancellationToken.ThrowIfCancellationRequested();
 
-        var inner = PfsWriter.BuildInnerPfs(pfsFiles, 0);
+        // Small projects: the proven in-memory path (byte-identical output).
+        var pfsBytes = pfsFiles
+            .Select(s => (s.TargetPath, Data: s.Data ?? File.ReadAllBytes(s.SourcePath)))
+            .ToList();
+        var inner = PfsWriter.BuildInnerPfs(pfsBytes, 0);
         var pfsc = PFSCWriter.Build(inner, storeAllRaw: options.PfscMode != PfscMode.Compressed);
         var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, out long outerDataStartMem);
 
-        var pkg = Assemble(project, pfsFiles, outer, passcode, dk, inner.Length, sc0Files, outerDataStartMem);
+        var pkg = Assemble(project, pfsBytes, outer, passcode, dk, inner.Length, sc0Files, outerDataStartMem);
         File.WriteAllBytes(outputPath, pkg);
         if (options.Validate)
             PkgValidator.ValidatePkgFile(outputPath, passcode);
         if (options.ManifestPath != null)
-            WriteManifest(options.ManifestPath, project, pfsFiles, sc0Files, inner.Length, pfsc.Length, outer.Length,
+            WriteManifest(options.ManifestPath, project, pfsBytes.Select(f => (f.TargetPath, (long)f.Data.Length)).ToList(),
+                sc0Files, inner.Length, pfsc.Length, outer.Length,
                 pkg.Length, dk, passcode, outputPath, options);
     }
 
     /// <summary>Streams the build through temp files for games whose inner PFS exceeds 2 GB.</summary>
-    private static void BuildLarge(Gp4Project project, List<(string Path, byte[] Data)> pfsFiles,
+    private static void BuildLarge(Gp4Project project, List<PfsSourceFile> pfsFiles,
         List<(string Path, byte[] Data)> sc0Files, byte[][] dk, string passcode, string outputPath,
         BuildOptions options)
     {
         var ct = options.CancellationToken;
 
         // Pre-flight disk-space estimate (temp pipeline is ~3.2× inner + output).
-        long estInner = pfsFiles.Sum(f => (f.Data.Length + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize * PfsFormat.BlockSize);
+        long estInner = pfsFiles.Sum(f => (f.Length + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize * PfsFormat.BlockSize);
         long required = (long)(estInner * PfsFormat.TempDiskMultiplier) + estInner / 4;
         var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(outputPath)) ?? ".");
         if (drive.AvailableFreeSpace < required)
@@ -145,7 +161,8 @@ public static class PkgBuilder
             {
                 long outerSize = new FileInfo(outerPath).Length;
                 long pfscSize = new FileInfo(pfscPath).Length;
-                WriteManifest(options.ManifestPath, project, pfsFiles, sc0Files, innerSize, pfscSize, outerSize,
+                WriteManifest(options.ManifestPath, project, pfsFiles.Select(f => (f.TargetPath, f.Length)).ToList(),
+                    sc0Files, innerSize, pfscSize, outerSize,
                     new FileInfo(outputPath).Length, dk, passcode, outputPath, options);
             }
         }
@@ -156,7 +173,7 @@ public static class PkgBuilder
     }
 
     /// <summary>Writes the optional build manifest (build.json).</summary>
-    private static void WriteManifest(string path, Gp4Project project, List<(string Path, byte[] Data)> pfsFiles,
+    private static void WriteManifest(string path, Gp4Project project, IReadOnlyList<(string Path, long Length)> pfsFiles,
         List<(string Path, byte[] Data)> sc0Files, long innerPfsSize, long pfscSize, long outerPfsSize,
         long pkgSize, byte[][] dk, string passcode, string outputPath, BuildOptions options)
     {
@@ -201,7 +218,7 @@ public static class PkgBuilder
         File.WriteAllText(path, manifest.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
     }
 
-    private static void AssembleToFile(Gp4Project project, List<(string Path, byte[] Data)> files,
+    private static void AssembleToFile(Gp4Project project, IReadOnlyList<PfsSourceFile> files,
         string outerPfsPath, string passcode, byte[][] dk, long innerPfsSize,
         List<(string Path, byte[] Data)>? sc0Files, string outputPath,
         System.Threading.CancellationToken ct = default, Action<long, long>? progress = null,
@@ -547,7 +564,7 @@ public static class PkgBuilder
     }
 
     /// <summary>Builds the PKG entry list (shared with Assemble).</summary>
-    private static List<BuildEntry> BuildAssembleEntries(Gp4Project project, List<(string Path, byte[] Data)> files,
+    private static List<BuildEntry> BuildAssembleEntries(Gp4Project project, IReadOnlyList<PfsSourceFile> files,
         string passcode, byte[][] dk, long innerPfsSize, List<(string Path, byte[] Data)>? sc0Files)
     {
         var entries = new List<BuildEntry>();

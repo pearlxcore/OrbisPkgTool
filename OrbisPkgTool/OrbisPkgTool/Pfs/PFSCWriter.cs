@@ -40,42 +40,11 @@ public static class PFSCWriter
         WriteLe(output, (ulong)dataOffset);
         WriteLe(output, rounded);
 
-        // Table (entry 0 = dataOffset, then each block's end offset)
-        long pos = dataOffset;
-        byte[] sizeBuf = new byte[8];
-        for (int i = 0; i <= blockCount; i++)
-        {
-            output.Position = tableOffset + i * 8;
-            WriteLe(output, (ulong)pos);
-            if (i < blockCount)
-            {
-                pfsImage.Position = (long)i * blockSize;
-                long remain = total - (long)i * blockSize;
-                var raw = new byte[(int)Math.Min((long)blockSize, remain)];
-                pfsImage.Read(raw, 0, raw.Length);
-                if (storeAllRaw)
-                {
-                    pos += raw.Length;
-                    continue;
-                }
-                // compressed path: 0x48 0x89 + raw deflate level 6
-                var deflater = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(6, noZlibHeaderOrFooter: true);
-                deflater.SetInput(raw, 0, raw.Length);
-                deflater.Finish();
-                using var z = new MemoryStream();
-                var compBuf = new byte[blockSize];
-                int n;
-                while ((n = deflater.Deflate(compBuf)) > 0) z.Write(compBuf, 0, n);
-                var comp = z.ToArray();
-                // Complete zlib stream: 2-byte header + deflate + 4-byte BE Adler32.
-                if (comp.Length + 6 >= blockSize)
-                    pos += blockSize; // stored raw (block written later)
-                else
-                    pos += comp.Length + 6;
-            }
-        }
-
-        // Data (packed sequentially)
+        // Single-pass construction: compress/store each block exactly once,
+        // record its end offset, write the table afterwards. (The old two-pass
+        // version compressed every block TWICE — once to size the table, once
+        // to write — doubling the cost of the slowest build stage. Deflate is
+        // deterministic, so offsets and bytes are identical.)
         pfsImage.Position = 0;
         if (storeAllRaw)
         {
@@ -90,16 +59,25 @@ public static class PFSCWriter
                 copied += cn;
                 progress?.Invoke(copied, total);
             }
+            // Table: each raw block occupies its exact bytes (the last block is
+            // partial) — offsets are cumulative from dataOffset.
+            for (int i = 0; i <= blockCount; i++)
+            {
+                output.Position = tableOffset + i * 8;
+                WriteLe(output, (ulong)(dataOffset + Math.Min((long)i * blockSize, total)));
+            }
         }
         else
         {
+            var table = new ulong[blockCount + 1];
             var raw = new byte[blockSize];
             long dataPos = dataOffset;
+            table[0] = (ulong)dataPos;
+            output.Position = dataOffset;
             for (int i = 0; i < blockCount; i++)
             {
                 ct.ThrowIfCancellationRequested();
                 progress?.Invoke(dataPos - dataOffset, total);
-                pfsImage.Position = (long)i * blockSize;
                 long remain = total - (long)i * blockSize;
                 int len = (int)Math.Min((long)blockSize, remain);
                 pfsImage.Read(raw, 0, len);
@@ -111,7 +89,6 @@ public static class PFSCWriter
                 int n;
                 while ((n = deflater.Deflate(compBuf)) > 0) z.Write(compBuf, 0, n);
                 var comp = z.ToArray();
-                output.Position = dataPos; // packed sequential — table from pass 1 matches
                 if (comp.Length + 6 >= blockSize)
                 {
                     output.Write(raw, 0, blockSize);
@@ -124,6 +101,13 @@ public static class PFSCWriter
                     WriteBe(output, Adler32(raw.AsSpan(0, len)));
                     dataPos += comp.Length + 6;
                 }
+                table[i + 1] = (ulong)dataPos;
+            }
+            // Table (entry 0 = dataOffset, then each block's end offset).
+            for (int i = 0; i <= blockCount; i++)
+            {
+                output.Position = tableOffset + i * 8;
+                WriteLe(output, table[i]);
             }
         }
     }

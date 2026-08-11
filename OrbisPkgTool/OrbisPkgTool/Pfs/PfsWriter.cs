@@ -9,6 +9,17 @@ namespace OrbisPkgTool.Pfs;
 /// block 0 header, block 1 inode table, superroot dirents, flat path table,
 /// an empty block, indirect blocks, uroot dirents, then contiguous data.
 /// </summary>
+/// <summary>
+/// Disk-backed source file descriptor for streaming builds. Metadata only —
+/// the file CONTENTS are opened lazily from <see cref=”PfsSourceFile.SourcePath”/>
+/// while the inner PFS is written, keeping memory bounded for multi-GB games.
+/// </summary>
+public sealed record PfsSourceFile(string TargetPath, string SourcePath, long Length)
+{
+    /// <summary>Optional in-memory content for small generated files (e.g. keystone).</summary>
+    public byte[]? Data { get; init; }
+}
+
 public static class PfsWriter
 {
     // Central, origin-classified format constants — see PfsFormat.cs.
@@ -19,23 +30,54 @@ public static class PfsWriter
     // Inner PFS (mode 0x8, D32 inodes) â€” the game filesystem
     // ------------------------------------------------------------------
 
+    /// <summary>Internal uniform file input: memory-backed or disk-backed.</summary>
+    private sealed class PfsFileInput
+    {
+        public required string Path;
+        public required long Length;
+        public byte[]? Data;      // memory-backed (small/generated files)
+        public string? SourcePath; // disk-backed (large files)
+    }
+
     /// <summary>
-    /// Builds the inner PFS image containing the given files.
-    /// <paramref name="files"/>: target path (e.g. "eboot.bin") â†’ data.
+    /// Builds the inner PFS image containing the given files (memory-backed).
+    /// <paramref name=”files”/>: target path (e.g. “eboot.bin”) â†’ data.
     /// Layout: block 0 header, 1 inodes, 2 superroot dirents, 3 fpt, 4 empty,
     /// then dir dirent blocks, then contiguous file data.
     /// </summary>
-    /// <summary>Builds the inner PFS into the given stream (supports >2GB).</summary>
     public static void BuildInnerPfsToStream(List<(string Path, byte[] Data)> files, long fileTime, Stream output,
         System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
     {
-        files = files.OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase).ToList();
+        var inputs = files
+            .OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(f => new PfsFileInput { Path = f.Path, Length = f.Data.Length, Data = f.Data })
+            .ToList();
+        BuildInnerPfsCore(inputs, fileTime, output, ct, progress);
+    }
 
+    /// <summary>
+    /// Builds the inner PFS image from disk-backed source descriptors (streaming;
+    /// supports &gt;2GB games without loading file contents into memory).
+    /// Byte-identical output to the memory-backed overload for the same files.
+    /// </summary>
+    public static void BuildInnerPfsToStream(IReadOnlyList<PfsSourceFile> files, long fileTime, Stream output,
+        System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
+    {
+        var inputs = files
+            .OrderBy(f => f.TargetPath, StringComparer.OrdinalIgnoreCase)
+            .Select(f => new PfsFileInput { Path = f.TargetPath, Length = f.Length, Data = f.Data, SourcePath = f.SourcePath })
+            .ToList();
+        BuildInnerPfsCore(inputs, fileTime, output, ct, progress);
+    }
+
+    private static void BuildInnerPfsCore(List<PfsFileInput> files, long fileTime, Stream output,
+        System.Threading.CancellationToken ct, Action<long, long>? progress)
+    {
         // Directory tree
         var root = new DirNode { Name = "uroot" };
-        foreach (var (path, data) in files)
+        foreach (var input in files)
         {
-            var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var parts = input.Path.Split('/', StringSplitOptions.RemoveEmptyEntries);
             var dir = root;
             for (int i = 0; i < parts.Length - 1; i++)
             {
@@ -47,7 +89,7 @@ public static class PfsWriter
                 }
                 dir = child;
             }
-            dir.Files.Add(new FileNode { Name = parts[^1], Data = data, Parent = dir });
+            dir.Files.Add(new FileNode { Name = parts[^1], Input = input, Parent = dir });
         }
 
         var dirs = AllDirs(root).ToList();
@@ -104,7 +146,7 @@ public static class PfsWriter
             f.StartBlock = nextBlock;
             // Empty files must still occupy one block — allocating 0 blocks
             // makes the next file share this StartBlock (block overlap).
-            long blocks = CeilDiv(f.Data.Length, (int)BlockSize);
+            long blocks = CeilDiv(f.Input.Length, (int)BlockSize);
             if (blocks < 1) blocks = 1;
             nextBlock += blocks;
         }
@@ -194,9 +236,9 @@ public static class PfsWriter
         foreach (var f in fileNodes)
         {
             NextInode();
-            long blocks = CeilDiv(f.Data.Length, (int)BlockSize);
+            long blocks = CeilDiv(f.Input.Length, (int)BlockSize);
             if (blocks < 1) blocks = 1; // empty files still occupy one block
-            WriteD32Inode(w, inodePos, 0x816D, 1, 0x00000010, f.Data.Length,
+            WriteD32Inode(w, inodePos, 0x816D, 1, 0x00000010, f.Input.Length,
                 blocks, f.StartBlock);
             inodePos += 0xA8;
         }
@@ -281,14 +323,24 @@ public static class PfsWriter
             foreach (var f in d.Files)
                 WriteDirent(w, ref dpos, f.Number, PfsDirentType.File, f.Name);
         }
-        long dataTotal = fileNodes.Sum(f => (long)f.Data.Length);
+        long dataTotal = fileNodes.Sum(f => f.Input.Length);
         long dataDone = 0;
         foreach (var f in fileNodes)
         {
             ct.ThrowIfCancellationRequested();
             output.Position = f.StartBlock * BlockSize;
-            output.Write(f.Data, 0, f.Data.Length);
-            dataDone += f.Data.Length;
+            if (f.Input.Data != null)
+            {
+                output.Write(f.Input.Data, 0, f.Input.Data.Length);
+            }
+            else
+            {
+                // Disk-backed: stream one file at a time with a bounded buffer.
+                using var input = new FileStream(f.Input.SourcePath!, FileMode.Open, FileAccess.Read,
+                    FileShare.Read, 1 << 20, FileOptions.SequentialScan);
+                input.CopyTo(output, 1 << 20);
+            }
+            dataDone += f.Input.Length;
             progress?.Invoke(dataDone, dataTotal);
         }
     }
@@ -973,7 +1025,7 @@ public static class PfsWriter
         public DirNode? Parent;
         public uint Number;
         public long StartBlock;
-        public byte[] Data = [];
+        public PfsFileInput Input = new() { Path = "", Length = 0 };
     }
 
     /// <summary>Full "/"-separated path of a node from the filesystem root (the
