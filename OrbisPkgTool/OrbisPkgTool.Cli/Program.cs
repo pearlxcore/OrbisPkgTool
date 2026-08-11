@@ -1581,7 +1581,7 @@ static void RunBuildTest(string[] args)
         var dk = new byte[7][];
         for (uint i = 0; i < 7; i++)
             dk[i] = OrbisPkgTool.Crypto.PkgCrypto.DeriveKey(project.ContentId, "00000000000000000000000000000000", i);
-        var outer = OrbisPkgTool.Pfs.PfsWriter.BuildOuterPfs(payload, "pfs_image.dat", dk[1], OrbisPkgTool.Crypto.Keys.FakeKeySeed, 0);
+        var outer = OrbisPkgTool.Pfs.PfsWriter.BuildOuterPfs(payload, "pfs_image.dat", dk[1], OrbisPkgTool.Crypto.Keys.FakeKeySeed, 0, out _);
         OrbisPkgTool.Pkg.PkgBuilder.BuildCs(args[0], args[1], args[3], outer, "00000000000000000000000000000000");
         Console.WriteLine($"Built {args[3]} with PFSC content ({payload.Length} bytes) + outer {outer.Length}");
         return;
@@ -1598,7 +1598,7 @@ static void RunBuildTest(string[] args)
             innerForOuter = payload; // pfs_image.dat = raw inner PFS (no PFSC)
         else
             innerForOuter = OrbisPkgTool.Pfs.PFSCWriter.Build(payload, storeAllRaw: args.Length >= 5 && args[4] == "--rawall");
-        var outer = OrbisPkgTool.Pfs.PfsWriter.BuildOuterPfs(innerForOuter, "pfs_image.dat", dk[1], OrbisPkgTool.Crypto.Keys.FakeKeySeed, 0);
+        var outer = OrbisPkgTool.Pfs.PfsWriter.BuildOuterPfs(innerForOuter, "pfs_image.dat", dk[1], OrbisPkgTool.Crypto.Keys.FakeKeySeed, 0, out _);
         OrbisPkgTool.Pkg.PkgBuilder.BuildCs(args[0], args[1], args[3], outer, "00000000000000000000000000000000");
         Console.WriteLine($"Built {args[3]} with inner PFS {(rawInner ? "RAW" : "PFSC")} ({innerForOuter.Length} bytes) + outer {outer.Length}");
     }

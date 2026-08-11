@@ -77,9 +77,9 @@ public static class PkgBuilder
         options.CancellationToken.ThrowIfCancellationRequested();
         var inner = PfsWriter.BuildInnerPfs(pfsFiles, 0);
         var pfsc = PFSCWriter.Build(inner, storeAllRaw: options.PfscMode != PfscMode.Compressed);
-        var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0);
+        var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, out long outerDataStartMem);
 
-        var pkg = Assemble(project, pfsFiles, outer, passcode, dk, inner.Length, sc0Files);
+        var pkg = Assemble(project, pfsFiles, outer, passcode, dk, inner.Length, sc0Files, outerDataStartMem);
         File.WriteAllBytes(outputPath, pkg);
         if (options.Validate)
             PkgValidator.ValidatePkgFile(outputPath, passcode);
@@ -126,14 +126,17 @@ public static class PkgBuilder
                     (done, total) => options.Progress?.Invoke(BuildStage.Pfsc, done, total));
 
             // 3. Outer PFS → file (signing + XTS)
+            long outerDataStart = 0;
             using (var pfscIn = new FileStream(pfscPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var outerFs = new FileStream(outerPath, FileMode.Create, FileAccess.ReadWrite))
-                PfsWriter.BuildOuterPfsToStream(pfscIn, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, outerFs, ct,
+                PfsWriter.BuildOuterPfsToStream(pfscIn, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, outerFs,
+                    out outerDataStart, ct,
                     (done, total) => options.Progress?.Invoke(BuildStage.OuterPfs, done, total));
 
             // 4. Assemble PKG → output file
             AssembleToFile(project, pfsFiles, outerPath, passcode, dk, innerSize, sc0Files, outputPath, ct,
-                (done, total) => options.Progress?.Invoke(BuildStage.Assemble, done, total));
+                (done, total) => options.Progress?.Invoke(BuildStage.Assemble, done, total),
+                outerDataStart: outerDataStart);
 
             if (options.Validate)
                 PkgValidator.ValidatePkgFile(outputPath, passcode);
@@ -200,7 +203,8 @@ public static class PkgBuilder
     private static void AssembleToFile(Gp4Project project, List<(string Path, byte[] Data)> files,
         string outerPfsPath, string passcode, byte[][] dk, long innerPfsSize,
         List<(string Path, byte[] Data)>? sc0Files, string outputPath,
-        System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
+        System.Threading.CancellationToken ct = default, Action<long, long>? progress = null,
+        long outerDataStart = 0)
     {
         // Build the entry list + table in memory (entry data is small).
         var entries = BuildAssembleEntries(project, files, passcode, dk, innerPfsSize, sc0Files);
@@ -383,7 +387,13 @@ public static class PkgBuilder
         WriteBe64(hdr, 0x428, (ulong)pkgSize);
         WriteBe64(hdr, 0x430, (ulong)pkgSize);
         WriteBe32(hdr, 0x438, 0x10000);
-        WriteBe32(hdr, 0x43C, 0xD0000);
+        // pfs_cache_size: shadPS4 reads cache*2 bytes from pfs_image_offset and
+        // scans for the PFSC magic (GetPFSCOffset) within that window. It MUST
+        // cover the pfs_image.dat data start block, or a false PFSC magic at a
+        // lower block (e.g. uroot data) is found and the sector map is garbage
+        // -> bad_alloc in shadPS4Plus. Orbis uses ~(dataStart+19)*0x8000.
+        long cacheSz = Math.Max(0x140000, (outerDataStart + 16) * 0x8000);
+        WriteBe32(hdr, 0x43C, (uint)cacheSz);
 
         // sc_entries1_hash / sc_entries2_hash / digest_table_hash (in-memory)
         using (var ms = new MemoryStream())
@@ -741,7 +751,7 @@ public static class PkgBuilder
 
     private static byte[] Assemble(Gp4Project project, List<(string Path, byte[] Data)> files,
         byte[] outerPfs, string passcode, byte[][] dk, long innerPfsSize,
-        List<(string Path, byte[] Data)>? sc0Files = null)
+        List<(string Path, byte[] Data)>? sc0Files = null, long outerDataStart = 0)
     {
         var entries = new List<BuildEntry>();
 
@@ -977,7 +987,7 @@ public static class PkgBuilder
         WriteBe64(pkg, 0x428, (ulong)pkg.Length);
         WriteBe64(pkg, 0x430, (ulong)pkg.Length);
         WriteBe32(pkg, 0x438, 0x10000);
-        WriteBe32(pkg, 0x43C, 0xD0000);
+        WriteBe32(pkg, 0x43C, (uint)Math.Max(0x140000, (outerDataStart + 16) * 0x8000));
 
         // Digests
         using (var ms = new MemoryStream())

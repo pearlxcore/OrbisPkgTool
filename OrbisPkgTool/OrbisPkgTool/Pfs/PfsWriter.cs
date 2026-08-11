@@ -312,7 +312,8 @@ public static class PfsWriter
     /// Builds the outer PFS image containing a single file <paramref name="fileName"/>
     /// (e.g. "pfs_image.dat") and XTS-encrypts sectors 16+.
     /// </summary>
-    public static byte[] BuildOuterPfs(byte[] fileData, string fileName, byte[] ekpfs, byte[] seed, long fileTime)
+    public static byte[] BuildOuterPfs(byte[] fileData, string fileName, byte[] ekpfs, byte[] seed, long fileTime,
+        out long dataStartBlock)
     {
         long dataBlocks = CeilDiv(fileData.Length, (int)BlockSize);
         // Block layout matches LibOrbisPkg: 0 header, 1 inodes, 2 superroot,
@@ -322,7 +323,8 @@ public static class PfsWriter
         long indirect2 = dataBlocks > 12 + 1820 ? 1 : 0;
         long nIndirect = dataBlocks > 12 + 1820 ? CeilDiv(dataBlocks - 12 - 1820, 1820L) : 0;
         long urootBlock = 5 + indirect1 + indirect2 + nIndirect;
-        long dataStart = urootBlock + 1;
+        dataStartBlock = urootBlock + 1;
+        long dataStart = dataStartBlock;
         long ndblock = dataStart + dataBlocks;
         long emptyBlock = 4;  // LibOrbisPkg: empty block right after FPT, stays plaintext
 
@@ -426,7 +428,8 @@ public static class PfsWriter
 
     /// <summary>Outer PFS builder for images that don't fit in a byte[] (stream based).</summary>
     public static void BuildOuterPfsToStream(Stream fileData, string fileName, byte[] ekpfs, byte[] seed,
-        long fileTime, Stream output, System.Threading.CancellationToken ct = default,
+        long fileTime, Stream output, out long dataStartBlock,
+        System.Threading.CancellationToken ct = default,
         Action<long, long>? progress = null)
     {
         long dataBlocks = CeilDiv(fileData.Length, (int)BlockSize);
@@ -434,7 +437,8 @@ public static class PfsWriter
         long indirect2 = dataBlocks > 12 + 1820 ? 1 : 0;
         long nIndirect = dataBlocks > 12 + 1820 ? CeilDiv(dataBlocks - 12 - 1820, 1820L) : 0;
         long urootBlock = 5 + indirect1 + indirect2 + nIndirect;
-        long dataStart = urootBlock + 1;
+        dataStartBlock = urootBlock + 1;
+        long dataStart = dataStartBlock;
         long ndblock = dataStart + dataBlocks;
         long emptyBlock = 4;
 
