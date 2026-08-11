@@ -312,13 +312,19 @@ public sealed class PfsReader
     public List<PfsDirent> ReadDirents(PfsInode dir)
     {
         var result = new List<PfsDirent>();
-        long remaining = dir.Size > 0 ? dir.Size : BlockSize;
-        foreach (int block in dir.DirectBlocks)
+        // EnumerateBlocks expands contiguous runs (db[0]=first, db[1..]=-1):
+        // a directory whose dirents span multiple blocks would otherwise lose
+        // every continuation block (db[1] = -1 breaks the raw array walk).
+        // Each block is terminated by its padding (invalid entsize / ino==0);
+        // the block list itself is bounded by ino.Blocks. dir.Size is the
+        // ROUNDED allocation (blocks * 0x10000), NOT a dirent byte budget, so
+        // it must not be used to stop the walk mid-directory.
+        foreach (int block in EnumerateBlocks(dir))
         {
-            if (block <= 0 || remaining <= 0) break;
+            if (block <= 0) break;
             byte[] data = ReadBlock(block);
             int off = 0;
-            while (off + 16 <= data.Length && remaining > 0)
+            while (off + 16 <= data.Length)
             {
                 uint inodeNumber = ReadLe32(data, off);
                 int type = ReadLe32Signed(data, off + 4);
@@ -330,9 +336,7 @@ public sealed class PfsReader
                     .TrimEnd('\0'); // PFS names are null-terminated
                 result.Add(new PfsDirent(inodeNumber, type, name));
                 off += entSize;
-                remaining -= entSize;
             }
-            remaining -= BlockSize;
         }
         return result;
     }
