@@ -259,6 +259,27 @@ try
         case "s4trace":
             Environment.ExitCode = S4Trace.Run(ParseOptions(cmdArgs, out _).Pkg);
             break;
+        case "s4extract":
+        {
+            string? pkg = null, outDir = null;
+            int dbgBlock = -1;
+            for (int i = 1; i < cmdArgs.Length; i++)
+            {
+                if (cmdArgs[i] == "--out" && i + 1 < cmdArgs.Length) outDir = cmdArgs[++i];
+                else if (cmdArgs[i] == "--block" && i + 1 < cmdArgs.Length) dbgBlock = int.Parse(cmdArgs[++i]);
+                else if (!cmdArgs[i].StartsWith('-')) pkg = cmdArgs[i];
+            }
+            if (pkg == null || !File.Exists(pkg))
+            {
+                Console.Error.WriteLine("usage: s4extract <pkg> [--out <dir>] [--block <n>]");
+                Console.Error.WriteLine("  Replicates shadPS4Plus PKG::Extract+ExtractFiles exactly,");
+                Console.Error.WriteLine("  reporting the first operation that would crash.");
+                Environment.ExitCode = 2;
+                break;
+            }
+            Environment.ExitCode = S4Extract.Run(pkg, outDir, dbgBlock);
+            break;
+        }
         case "help":
         case "-h":
         case "--help":
@@ -1281,6 +1302,7 @@ static void RunPkgBuild(string[] args)
     bool validate = false;
     string pfscMode = "store";
     string? manifest = null;
+    string backend = "current";
     for (int i = 0; i < args.Length; i++)
     {
         switch (args[i])
@@ -1289,6 +1311,7 @@ static void RunPkgBuild(string[] args)
             case "--out" when i + 1 < args.Length: outFile = args[++i]; break;
             case "--validate": validate = true; break;
             case "--pfsc-mode" when i + 1 < args.Length: pfscMode = args[++i]; break;
+            case "--pfs-backend" when i + 1 < args.Length: backend = args[++i]; break;
             case "--manifest" when i + 1 < args.Length: manifest = args[++i]; break;
             default:
                 if (!args[i].StartsWith('-'))
@@ -1302,7 +1325,8 @@ static void RunPkgBuild(string[] args)
     if (gp4 == null || !File.Exists(gp4))
     {
         Console.Error.WriteLine("usage: pkg build <project.gp4> <source_folder> [--passcode X] [--out file.pkg]");
-        Console.Error.WriteLine("       [--pfsc-mode store|compressed] [--manifest file.json] [--validate]");
+        Console.Error.WriteLine("       [--pfsc-mode store|compressed] [--pfs-backend current|liborbis]");
+        Console.Error.WriteLine("       [--manifest file.json] [--validate]");
         Environment.ExitCode = 2;
         return;
     }
@@ -1318,6 +1342,8 @@ static void RunPkgBuild(string[] args)
             Passcode = passcode,
             PfscMode = pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase)
                 ? OrbisPkgTool.Pkg.PfscMode.Compressed : OrbisPkgTool.Pkg.PfscMode.Store,
+            Backend = backend.Equals("liborbis", StringComparison.OrdinalIgnoreCase)
+                ? OrbisPkgTool.Pkg.PfsBackend.LibOrbis : OrbisPkgTool.Pkg.PfsBackend.Current,
             Validate = validate,
             ManifestPath = manifest,
             CancellationToken = cts.Token,

@@ -65,6 +65,11 @@ public static class PfsWriter
         //   then uroot, subdirs, files.  The resolver exists ONLY when a FPT
         //   hash collision was found (OpenOrbis/LibOrbisPkg reference).
         uint next = hasCollision ? 4u : 3u;
+        // uroot's own inode number — MUST be set: the `..` dirent of every
+        // first-level dir references it (d.Parent.Number) and would otherwise
+        // be 0 (unset), which breaks readers that stop at ino==0 (shadPS4
+        // PKG::Extract) and is invalid PFS (a PS4 would reject it too).
+        root.Number = hasCollision ? 3u : 2u;
         foreach (var d in dirs) d.Number = next++;
         foreach (var f in fileNodes) f.Number = next++;
         int dinodeCount = (int)next;
@@ -254,9 +259,11 @@ public static class PfsWriter
         }
 
         // ---- uroot dirents (populated, with . and .. like real inner FPKGs) ----
+        // . and .. reference the uroot's ACTUAL inode (2, or 3 with a collision
+        // resolver) — hardcoding 2 would point at the resolver when present.
         long pos = urootBlock * BlockSize;
-        WriteDirent(w, ref pos, 2, PfsDirentType.Dot, ".");
-        WriteDirent(w, ref pos, 2, PfsDirentType.DotDot, "..");
+        WriteDirent(w, ref pos, root.Number, PfsDirentType.Dot, ".");
+        WriteDirent(w, ref pos, root.Number, PfsDirentType.DotDot, "..");
         foreach (var d in root.Dirs)
             WriteDirent(w, ref pos, d.Number, PfsDirentType.Directory, d.Name);
         foreach (var f in root.Files)
