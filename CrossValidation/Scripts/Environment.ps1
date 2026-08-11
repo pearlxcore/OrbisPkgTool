@@ -99,12 +99,24 @@ function Get-SonyWarningCount([string]$LogFile) {
 function Test-OpenOrbisExpectedDifference([string]$LogFile) {
     if (-not (Test-Path $LogFile)) { return $false }
     $out = Get-LogOutput $LogFile
+    # PfsReader limitation: OpenOrbis declares the ORIGINAL's outer PFS inode 0
+    # corrupt on some Sony packages (control-proven — Sony's own img_verify and
+    # our reader both pass the same package).
+    if ($out -match "inode 0 is corrupt") { return $true }
     # Only FAILING digest-hash checks count as the known OpenOrbis limitation
     # (Content Digest / Major Param Digest / entry digests hashed at logical
     # DataSize). Ok digest lines must NOT match — earlier regex matched them.
     $trio = @($out | Where-Object { $_ -match "^  Fail .*digest @" })
     $fails = @($out | Where-Object { $_ -match "^  Fail " })
     return $trio.Count -gt 0 -and $fails.Count -eq $trio.Count
+}
+
+# Our validator on the REFERENCE only: some originals carry a trophy00.trp whose
+# ZIP entries use a compression method our reader doesn't support. Reference-side
+# limitation, not a builder defect (never applies to our own packages).
+function Test-OursReferenceQuirk([string]$LogFile) {
+    if (-not (Test-Path $LogFile)) { return $false }
+    return (Get-LogOutput $LogFile) -match "unsupported compression method"
 }
 
 # ── phase artifact cleanup (per-phase; respects keep_artifacts) ───────────

@@ -96,15 +96,35 @@ function New-SonyGp4 {
     }
     [void]$sb.AppendLine('  </files>')
     if ($WithRootDirs) {
-        # OpenOrbis's BuildFSTree walks <rootdir> — enumerate every subdirectory.
+        # OpenOrbis's BuildFSTree walks <rootdir> with NESTED children
+        # (FindDir walks breadcrumbs: dir.Dirs.Where(name==crumb).First()).
+        # Flat full-path targ_names break it ("Sequence contains no elements").
+        # Emit a proper nested tree like our gp4gen does.
         $dirs = Get-ChildItem -LiteralPath $Image0 -Recurse -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             (Get-RelPath $Image0 $_.FullName).Replace('\', '/')
         } | Sort-Object -Unique
-        $sb.AppendLine('  <rootdir>') | Out-Null
-        foreach ($dir in $dirs) {
-            $dirXml = $dir -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;'
-            [void]$sb.AppendLine("    <dir targ_name=""$dirXml"" />")
+        $root = [ordered]@{}
+        function Add-PathNode($node, [string[]]$segments, [int]$idx) {
+            if ($idx -ge $segments.Length) { return }
+            $name = $segments[$idx]
+            if (-not $node.Contains($name)) { $node[$name] = [ordered]@{} }
+            Add-PathNode $node[$name] $segments ($idx + 1)
         }
+        foreach ($dir in $dirs) { Add-PathNode $root ($dir.Split('/')) 0 }
+        function Write-DirNodes($node, [string]$indent) {
+            foreach ($name in $node.Keys) {
+                $xml = $name -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;'
+                if ($node[$name].Count -eq 0) {
+                    [void]$sb.AppendLine("$indent<dir targ_name=""$xml"" />")
+                } else {
+                    [void]$sb.AppendLine("$indent<dir targ_name=""$xml"">")
+                    Write-DirNodes $node[$name] ($indent + '    ')
+                    [void]$sb.AppendLine("$indent</dir>")
+                }
+            }
+        }
+        $sb.AppendLine('  <rootdir>') | Out-Null
+        Write-DirNodes $root '    '
         [void]$sb.AppendLine('  </rootdir>')
     } else {
         [void]$sb.AppendLine('  <rootdir />')
