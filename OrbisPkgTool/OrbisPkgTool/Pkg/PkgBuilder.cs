@@ -38,19 +38,19 @@ public static class PkgBuilder
         var pfsFiles = new List<(string Path, byte[] Data)>();
         var sc0Files = new List<(string Path, byte[] Data)>();
         long totalSize = 0;
-        foreach (var (entryPath, origPath) in project.Files)
+        foreach (var f in project.Files)
         {
-            if (entryPath == "sce_sys/param.sfo") continue;
-            string src = ResolveSource(projectFolder, origPath);
+            if (f.TargPath == "sce_sys/param.sfo") continue;
+            string src = ResolveSource(projectFolder, f.OrigPath);
             if (!File.Exists(src)) continue;
             byte[] data = File.ReadAllBytes(src);
             totalSize += data.Length;
-            if (entryPath.StartsWith("sce_sys/", StringComparison.OrdinalIgnoreCase))
-                sc0Files.Add((entryPath["sce_sys/".Length..], data));
+            if (f.TargPath.StartsWith("sce_sys/", StringComparison.OrdinalIgnoreCase))
+                sc0Files.Add((f.TargPath["sce_sys/".Length..], data));
             else
             {
-                string pfsPath = entryPath.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase)
-                    ? entryPath["Image0/".Length..] : entryPath;
+                string pfsPath = f.TargPath.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase)
+                    ? f.TargPath["Image0/".Length..] : f.TargPath;
                 pfsFiles.Add((pfsPath, data));
             }
         }
@@ -389,10 +389,12 @@ public static class PkgBuilder
         WriteBe32(hdr, 0x438, 0x10000);
         // pfs_cache_size: shadPS4 reads cache*2 bytes from pfs_image_offset and
         // scans for the PFSC magic (GetPFSCOffset) within that window. It MUST
-        // cover the pfs_image.dat data start block, or a false PFSC magic at a
-        // lower block (e.g. uroot data) is found and the sector map is garbage
-        // -> bad_alloc in shadPS4Plus. Orbis uses ~(dataStart+19)*0x8000.
-        long cacheSz = Math.Max(0x140000, (outerDataStart + 16) * 0x8000);
+        // cover the pfs_image.dat data start PLUS enough of the PFSC for the
+        // sector map and metadata scan, or a false PFSC magic at a lower block
+        // is found / the scan reads zeros -> bad_alloc in shadPS4Plus.
+        // Matches orbis: cache*2 = dataStart*0x10000 + ~5MB margin
+        // (Age of Wonders: dataStart=40 -> cache=0x3B0000 = (40*0x10000+0x4E0000)/2).
+        long cacheSz = Math.Max(0x140000, (outerDataStart * 0x10000 + 0x500000) / 2);
         WriteBe32(hdr, 0x43C, (uint)cacheSz);
 
         // sc_entries1_hash / sc_entries2_hash / digest_table_hash (in-memory)
@@ -625,14 +627,14 @@ public static class PkgBuilder
             throw new ArgumentException("GP4 is missing content_id");
 
         var fileData = new List<(string Path, byte[] Data)>();
-        foreach (var (entryPath, origPath) in project.Files)
+        foreach (var f in project.Files)
         {
-            if (entryPath == "sce_sys/param.sfo") continue;
-            string src = ResolveSource(projectFolder, origPath);
+            if (f.TargPath == "sce_sys/param.sfo") continue;
+            string src = ResolveSource(projectFolder, f.OrigPath);
             if (!File.Exists(src)) continue;
             // Strip "Image0/" prefix — the inner PFS IS Image0, files inside don't need it
-            string pfsPath = entryPath.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase)
-                ? entryPath["Image0/".Length..] : entryPath;
+            string pfsPath = f.TargPath.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase)
+                ? f.TargPath["Image0/".Length..] : f.TargPath;
             fileData.Add((pfsPath, File.ReadAllBytes(src)));
         }
 
@@ -708,10 +710,10 @@ public static class PkgBuilder
             w.WriteLine("  </volume>");
             w.WriteLine("  <files img_no=\"0\">");
             w.WriteLine("    <file targ_path=\"sce_sys/param.sfo\" orig_path=\"sce_sys/param.sfo\" />");
-            foreach (var (entryPath, origPath) in project.Files)
+            foreach (var f in project.Files)
             {
-                if (entryPath == "sce_sys/param.sfo") continue;
-                var safePath = SanitizeForOrbis(entryPath, projectFolder);
+                if (f.TargPath == "sce_sys/param.sfo") continue;
+                var safePath = SanitizeForOrbis(f.TargPath, projectFolder);
                 var esc = System.Security.SecurityElement.Escape(safePath);
                 w.WriteLine($"    <file targ_path=\"{esc}\" orig_path=\"{esc}\" />");
             }
@@ -987,7 +989,7 @@ public static class PkgBuilder
         WriteBe64(pkg, 0x428, (ulong)pkg.Length);
         WriteBe64(pkg, 0x430, (ulong)pkg.Length);
         WriteBe32(pkg, 0x438, 0x10000);
-        WriteBe32(pkg, 0x43C, (uint)Math.Max(0x140000, (outerDataStart + 16) * 0x8000));
+        WriteBe32(pkg, 0x43C, (uint)Math.Max(0x140000, (outerDataStart * 0x10000 + 0x500000) / 2));
 
         // Digests
         using (var ms = new MemoryStream())

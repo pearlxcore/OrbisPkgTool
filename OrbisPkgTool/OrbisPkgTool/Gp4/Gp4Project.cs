@@ -48,15 +48,23 @@ public sealed class Gp4Project
     public VolumeType VolumeType = VolumeType.PkgPs4App;
     public string ContentId = "";
     public string Passcode = "";
-    public string StorageType = "digital25";
+    public string StorageType = "digital50";
     public string AppType = "full";
     public string Version = "01.00";
     public string TitleId = "";
     public string Title = "";
     public string AppVersion = "01.00";
 
-    /// <summary>Target path (inside the PKG) → source path (relative to the GP4 file).</summary>
-    public List<(string EntryPath, string OrigPath)> Files = [];
+    /// <summary>One GP4 &lt;file&gt; entry, preserving all Sony attributes.</summary>
+    public sealed class Gp4File
+    {
+        public required string TargPath { get; init; }
+        public required string OrigPath { get; init; }
+        /// <summary>"enable" / "disable" / "" (absent).</summary>
+        public string PfsCompression { get; init; } = "";
+    }
+
+    public List<Gp4File> Files = [];
 
     public static Gp4Project Parse(string xml)
     {
@@ -90,38 +98,35 @@ public sealed class Gp4Project
         foreach (var file in doc.Descendants("file"))
         {
             // Our format: <file><entry path="..."/><orig_path>...</orig_path></file>
-            // orbis format: <file targ_path="..." orig_path="..."/>
+            // orbis format: <file targ_path="..." orig_path="..." pfs_compression="..."/>
             string entry = file.Element("entry")?.Attribute("path")?.Value
                 ?? file.Attribute("targ_path")?.Value ?? "";
             string orig = file.Element("orig_path")?.Value
                 ?? file.Attribute("orig_path")?.Value ?? "";
+            string comp = file.Attribute("pfs_compression")?.Value ?? "";
             if (entry.Length > 0)
-                proj.Files.Add((entry, orig.Length > 0 ? orig : entry));
+                proj.Files.Add(new Gp4File
+                {
+                    TargPath = entry,
+                    OrigPath = orig.Length > 0 ? orig : entry,
+                    PfsCompression = comp,
+                });
         }
         return proj;
     }
 
     /// <summary>
-    /// Serializes the project to GP4 XML in the canonical gengp4_app format
-    /// (verified against orbis-pub-cmd 3.87 output):
+    /// Serializes the project to GP4 XML in the canonical gengp4_app format:
     ///   <psproject fmt="gp4" version="1000">
-    ///     <volume>
-    ///       <volume_type>pkg_ps4_app</volume_type>
-    ///       <volume_id>PS4VOLUME</volume_id>
-    ///       <volume_ts>...</volume_ts>
-    ///       <package content_id=... passcode=... storage_type=... app_type=... />
-    ///       <chunk_info>...</chunk_info>
-    ///     </volume>
-    ///     <files>
-    ///       <file targ_path="..." orig_path="..." pfs_compression="enable" />
-    ///     </files>
-    ///     <rootdir />
+    ///     <volume> ... </volume>
+    ///     <files> <file targ_path=... orig_path=... pfs_compression=.../> </files>
+    ///     <rootdir> <dir targ_name=.../> ... </rootdir>
     ///   </psproject>
+    /// volume, files, rootdir are SIBLINGS (canonical hierarchy).
     /// </summary>
     public string Serialize()
     {
         var ts = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
-        // gengp4_app writes the 32-zero passcode explicitly when none is set.
         var pass = string.IsNullOrEmpty(Passcode) ? "00000000000000000000000000000000" : Passcode;
         var doc = new XDocument(
             new XElement("psproject",
@@ -149,24 +154,56 @@ public sealed class Gp4Project
                             new XElement("scenario",
                                 new XAttribute("id", "0"),
                                 new XAttribute("type", "sp"),
-                                new XAttribute("initial_chunk_count", "1")))),
-                    new XElement("files",
-                        Files.Select(f =>
-                            new XElement("file",
-                                new XAttribute("targ_path", f.EntryPath),
-                                new XAttribute("orig_path", f.OrigPath),
-                                // enable PFSC compression on game content
-                                // (mirrors gengp4_app; sce_sys/sce_module/eboot
-                                //  are written uncompressed by the tool — we
-                                //  enable for everything except sce_sys, matching
-                                //  the observed output)
-                                new XAttribute("pfs_compression",
-                                    f.EntryPath.StartsWith("sce_sys/") ||
-                                    f.EntryPath.StartsWith("sce_module/") ||
-                                    f.EntryPath == "eboot.bin"
-                                        ? "disable" : "enable"))))),
-                new XElement("rootdir")));
+                                new XAttribute("initial_chunk_count", "1"))))),
+                new XElement("files",
+                    Files.Select(f =>
+                    {
+                        var el = new XElement("file",
+                            new XAttribute("targ_path", f.TargPath),
+                            new XAttribute("orig_path", f.OrigPath));
+                        // Preserve the Sony attribute verbatim; when absent,
+                        // default to enable for game content (gengp4_app behavior).
+                        if (!string.IsNullOrEmpty(f.PfsCompression))
+                            el.Add(new XAttribute("pfs_compression", f.PfsCompression));
+                        else
+                            el.Add(new XAttribute("pfs_compression",
+                                f.TargPath.StartsWith("sce_sys/") ||
+                                f.TargPath.StartsWith("sce_module/") ||
+                                f.TargPath == "eboot.bin"
+                                    ? "disable" : "enable"));
+                        return el;
+                    })),
+                BuildRootDir()));
         return "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n" + doc.ToString();
+    }
+
+    /// <summary>Builds the <rootdir> directory tree from the file target paths.</summary>
+    private XElement BuildRootDir()
+    {
+        var root = new XElement("rootdir");
+        var dirs = new Dictionary<string, XElement>();
+        foreach (var f in Files)
+        {
+            string targ = f.TargPath.Replace('\\', '/');
+            int slash = targ.LastIndexOf('/');
+            if (slash <= 0) continue;
+            string dirPath = targ[..slash];
+            var parts = dirPath.Split('/');
+            string cur = "";
+            XElement node = root;
+            for (int i = 0; i < parts.Length; i++)
+            {
+                cur = cur.Length == 0 ? parts[i] : cur + "/" + parts[i];
+                if (!dirs.TryGetValue(cur, out var child))
+                {
+                    child = new XElement("dir", new XAttribute("targ_name", parts[i]));
+                    dirs[cur] = child;
+                    node.Add(child);
+                }
+                node = child;
+            }
+        }
+        return root;
     }
 
     /// <summary>
@@ -193,7 +230,7 @@ public sealed class Gp4Project
         foreach (var f in files)
         {
             string rel = Path.GetRelativePath(folder, f).Replace('\\', '/');
-            proj.Files.Add((rel, rel));
+            proj.Files.Add(new Gp4File { TargPath = rel, OrigPath = rel });
         }
         return proj;
     }
