@@ -59,6 +59,11 @@ public static class PkgBuilder
             !pfsFiles.Any(f => f.Path.Equals("sce_sys/keystone", StringComparison.OrdinalIgnoreCase)))
             pfsFiles.Add(("sce_sys/keystone", PkgCrypto.CreateKeystone(passcode)));
 
+        // Mirror orbis-pub-cmd: scan the filesystem sce_sys/ for extra files
+        // that are NOT in the GP4 and add them as Sc0 entries. (Verified:
+        // orbis adds icon0.dds/pic0.dds/pic1.dds/save_data.png this way.)
+        AddMissingSc0FromFolder(projectFolder, sc0Files);
+
         var dk = new byte[7][];
         for (uint i = 0; i < 7; i++) dk[i] = PkgCrypto.DeriveKey(project.ContentId, passcode, i);
 
@@ -474,6 +479,30 @@ public static class PkgBuilder
         var combined = Path.Combine(projectFolder, norm);
         // If origPath was absolute, Path.GetFullPath keeps it absolute.
         return Path.GetFullPath(combined);
+    }
+
+    /// <summary>
+    /// Scans the filesystem sce_sys/ directory and adds any known Sc0 files
+    /// that the GP4 did not list — mirroring orbis-pub-cmd, which adds
+    /// icon0.dds/pic0.dds/pic1.dds/save_data.png etc. from disk. Without
+    /// this the built PKG has fewer Sc0 entries than an orbis build.
+    /// </summary>
+    private static void AddMissingSc0FromFolder(string projectFolder, List<(string Path, byte[] Data)> sc0Files)
+    {
+        string sceSys = Path.Combine(projectFolder, "sce_sys");
+        if (!Directory.Exists(sceSys)) return;
+
+        var present = new HashSet<string>(sc0Files.Select(f => f.Path), StringComparer.OrdinalIgnoreCase);
+        foreach (var file in Directory.EnumerateFiles(sceSys, "*", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(sceSys, file).Replace('\\', '/');
+            if (present.Contains(rel)) continue;
+            // Only add files with a known entry ID (param.sfo handled separately).
+            uint id = PkgEntryNames.Known.FirstOrDefault(kv => kv.Value == rel).Key;
+            if (id == 0) continue;
+            sc0Files.Add((rel, File.ReadAllBytes(file)));
+            present.Add(rel);
+        }
     }
 
     /// <summary>

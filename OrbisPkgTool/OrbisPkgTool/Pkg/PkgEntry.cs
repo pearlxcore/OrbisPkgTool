@@ -85,6 +85,8 @@ public static class PkgEntryIds
     public const uint ShareParamJson = 0x0000100B;
     public const uint ShareOverlayImagePng = 0x0000100C;
 
+    public const uint SaveDataPng = 0x0000100D;
+
     public const uint Icon0Png = 0x00001200;
     public const uint Pic0Png = 0x00001220;
     public const uint Snd0At9 = 0x00001240;
@@ -124,6 +126,7 @@ public static class PkgEntryNames
         [PkgEntryIds.Pic0Png] = "pic0.png",
         [PkgEntryIds.Snd0At9] = "snd0.at9",
         [PkgEntryIds.ChangeInfoXml] = "changeinfo/changeinfo.xml",
+        [PkgEntryIds.SaveDataPng] = "save_data.png",
         [PkgEntryIds.Icon0Dds] = "icon0.dds",
         [PkgEntryIds.Pic0Dds] = "pic0.dds",
         [PkgEntryIds.Pic1Dds] = "pic1.dds",
