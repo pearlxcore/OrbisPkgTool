@@ -2714,22 +2714,32 @@ OrbisPkgTool.Cli : PS4 PKG command-line tool
   Default passcode: 00000000000000000000000000000000
 
   Commands:
-    list       : List files in a PKG              (list -h for details)
-    extract    : Extract files from a PKG         (extract -h for details)
-    verify     : Verify PKG hashes/signatures
-    info       : Show PKG metadata
-    inspect    : Full PFS tree dump
-    build      : Build a fake PKG from GP4        (build -h for details)
-    gp4gen     : Generate GP4 from a folder       (gp4gen -h for details)
-    sweep      : Batch verify PKGs in a folder
-    bench      : Benchmark listing speed
-    selftest   : Validate RSA keys
-    sfo        : param.sfo tools                  (sfo -h for details)
-    trp        : Trophy TRP tools                 (trp -h for details)
+    list        : List files in a PKG              (list -h for details)
+    extract     : Extract files from a PKG         (extract -h for details)
+    verify      : Verify PKG hashes/signatures
+    info        : Show PKG metadata
+    inspect     : Full PFS tree dump
+    validate    : 8-stage structural validation
+    build       : Build a fake PKG from GP4        (build -h for details)
+    orbis-build : Build a fake PKG using orbis-pub-cmd
+    repack      : Extract + restructure + gp4gen + build (one-shot)
+    gp4gen      : Generate GP4 from a folder       (gp4gen -h for details)
+    restructure : Restructure dump for build (--check dry-run)
+    sweep       : Batch verify PKGs in a folder
+    bench        : Benchmark listing speed
+    selftest    : Validate RSA keys
+    sfo         : param.sfo tools                  (sfo -h for details)
+    trp         : Trophy TRP tools                 (trp -h for details)
 
   Diagnostic:
+    shadps4diag    : Mirror shadPS4 PKG reading logic step-by-step
+    s4trace        : Exact shadPS4Plus allocation/bounds replica
+    s4extract      : Exact shadPS4Plus Extract + ExtractFiles replica
+    s4crypto       : Replicate shadPS4 crypto chain
+    pkgfields      : Dump all PKG header/entry fields for A/B comparison
     signverify, pfsdump, pfsblock, innerfpt, iblock,
-    fixdigests, resignpfs, xtstest, buildtest, emptypayload
+    fixdigests, resignpfs, xtstest, buildtest, emptypayload,
+    pfscompare, dumppfsc, xtsdump, inflatecheck, deftest, blkcount
 ");
 }
 
