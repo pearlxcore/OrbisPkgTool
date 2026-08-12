@@ -81,6 +81,10 @@ public static class PkgBuilder
             if (slash > 0)
                 needDirs.Add("sce_sys/" + sc0Path[..slash]);
         }
+        // Sony always ships sce_sys/about/ (right.sprx) — our restructure
+        // deletes it because Sony regenerates it, so re-create the directory.
+        if (project.VolumeType == VolumeType.PkgPs4App)
+            needDirs.Add("sce_sys/about");
         foreach (var f in pfsFiles)
         {
             int slash = f.TargetPath.LastIndexOf('/');
@@ -89,10 +93,9 @@ public static class PkgBuilder
         }
         foreach (var dir in needDirs)
         {
-            byte[] empty = [];
-            // A zero-byte file forces the writer to create the directory tree
-            // without adding meaningful content or visible entries.
-            pfsFiles.Add(new PfsSourceFile(dir + "/.empty_pfs_dir", "", 0) { Data = empty });
+            // Trailing "/" marks an empty directory in the PFS tree
+            // (no file entry is created — the dir must still exist).
+            pfsFiles.Add(new PfsSourceFile(dir + "/", "", 0));
         }
 
         // Mirror orbis-pub-cmd: scan the filesystem sce_sys/ for extra files
@@ -115,7 +118,7 @@ public static class PkgBuilder
 
         // Small projects: the proven in-memory path (byte-identical output).
         var pfsBytes = pfsFiles
-            .Select(s => (s.TargetPath, Data: s.Data ?? File.ReadAllBytes(s.SourcePath)))
+            .Select(s => (s.TargetPath, Data: s.Data ?? (s.TargetPath.EndsWith('/') ? [] : File.ReadAllBytes(s.SourcePath))))
             .ToList();
         var inner = PfsWriter.BuildInnerPfs(pfsBytes, 0);
         var pfsc = PFSCWriter.Build(inner, storeAllRaw: options.PfscMode != PfscMode.Compressed);

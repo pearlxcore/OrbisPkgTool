@@ -77,9 +77,12 @@ public static class PfsWriter
         var root = new DirNode { Name = "uroot" };
         foreach (var input in files)
         {
+            // A trailing "/" marks an EMPTY DIRECTORY (no file entry is
+            // created — the directory itself must still exist in the tree).
+            bool isDirOnly = input.Path.EndsWith('/');
             var parts = input.Path.Split('/', StringSplitOptions.RemoveEmptyEntries);
             var dir = root;
-            for (int i = 0; i < parts.Length - 1; i++)
+            for (int i = 0; i < parts.Length - (isDirOnly ? 0 : 1); i++)
             {
                 var child = dir.Dirs.FirstOrDefault(d => d.Name == parts[i]);
                 if (child == null)
@@ -89,7 +92,8 @@ public static class PfsWriter
                 }
                 dir = child;
             }
-            dir.Files.Add(new FileNode { Name = parts[^1], Input = input, Parent = dir });
+            if (!isDirOnly)
+                dir.Files.Add(new FileNode { Name = parts[^1], Input = input, Parent = dir });
         }
 
         var dirs = AllDirs(root).ToList();
