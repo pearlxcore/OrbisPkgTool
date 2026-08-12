@@ -69,6 +69,32 @@ public static class PkgBuilder
             pfsFiles.Add(new PfsSourceFile("sce_sys/keystone", "", keystone.Length) { Data = keystone });
         }
 
+        // Directories under sce_sys/ that only have Sc0 files (trophy/,
+        // changeinfo/, about/) must also exist in the inner PFS tree.
+        // The writer creates dirs from file prefixes, so any file with
+        // prefix "sce_sys/trophy/" creates the trophy dir. We inject
+        // a synthetic empty file to force these dirs to exist.
+        var needDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (sc0Path, _) in sc0Files)
+        {
+            int slash = sc0Path.LastIndexOf('/');
+            if (slash > 0)
+                needDirs.Add("sce_sys/" + sc0Path[..slash]);
+        }
+        foreach (var f in pfsFiles)
+        {
+            int slash = f.TargetPath.LastIndexOf('/');
+            if (slash > 0)
+                needDirs.Remove(f.TargetPath[..slash]);
+        }
+        foreach (var dir in needDirs)
+        {
+            byte[] empty = [];
+            // A zero-byte file forces the writer to create the directory tree
+            // without adding meaningful content or visible entries.
+            pfsFiles.Add(new PfsSourceFile(dir + "/.empty_pfs_dir", "", 0) { Data = empty });
+        }
+
         // Mirror orbis-pub-cmd: scan the filesystem sce_sys/ for extra files
         // that are NOT in the GP4 and add them as Sc0 entries. (Verified:
         // orbis adds icon0.dds/pic0.dds/pic1.dds/save_data.png this way.)
