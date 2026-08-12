@@ -138,13 +138,30 @@ public static class PfsWriter
         //   blocks — games with >8192 files need 2+ blocks),
         //   N+2+fptBlocks=empty/collision_resolver, N+3+fptBlocks=uroot
         //   dirents, then dirs, then files.
+        // Precompute per-directory dirent byte counts (needed for both
+        // block allocation and inode sizing).
+        long DirSize(DirNode d)
+        {
+            long s = DirentSize(".") + DirentSize("..");
+            foreach (var c in d.Dirs) s += DirentSize(c.Name);
+            foreach (var c in d.Files) s += DirentSize(c.Name);
+            return s;
+        }
+        long urootDirentSize = DirSize(root);
+
         long superBlock = 1 + inodeBlocks;
         long fptBlock = superBlock + 1;
         long crBlock   = fptBlock + CeilDiv(fptSize, (int)BlockSize);
         long urootBlock = crBlock + 1;
-        long nextBlock = urootBlock + 1;
+        long nextBlock = urootBlock + CeilDiv(urootDirentSize, (int)BlockSize);
         foreach (var d in dirs)
-            d.DirentsBlock = nextBlock++;
+        {
+            d.DirentsBlock = nextBlock;
+            long db = CeilDiv(DirSize(d), (int)BlockSize);
+            if (db < 1) db = 1;
+            d.DirentBlocks = db;
+            nextBlock += db;
+        }
         foreach (var f in fileNodes)
         {
             f.StartBlock = nextBlock;
@@ -226,16 +243,21 @@ public static class PfsWriter
         // nlink = 3 + subdirectories (matches LibOrbisPkg: uroot starts at 3,
         // +1 per subdir; verified against real orbis output)
         int urootNlink = 3 + root.Dirs.Count;
+        long urootBlocks = CeilDiv(urootDirentSize, (int)BlockSize);
+        if (urootBlocks < 1) urootBlocks = 1;
         NextInode();
-        WriteD32Inode(w, inodePos, 0x416D, (ushort)urootNlink, 0x00000010, BlockSize, 1, urootBlock); inodePos += 0xA8;
+        WriteD32Inode(w, inodePos, 0x416D, (ushort)urootNlink, 0x00000010,
+            urootBlocks * BlockSize, urootBlocks, urootBlock); inodePos += 0xA8;
 
         // Remaining subdirectories
         foreach (var d in dirs)
         {
             // nlink = 2 + subdirectories (POSIX convention)
             ushort nlink = (ushort)(2 + d.Dirs.Count);
+            long db = d.DirentBlocks;
             NextInode();
-            WriteD32Inode(w, inodePos, 0x416D, nlink, 0x00000010, BlockSize, 1, d.DirentsBlock);
+            WriteD32Inode(w, inodePos, 0x416D, nlink, 0x00000010,
+                db * BlockSize, db, d.DirentsBlock);
             inodePos += 0xA8;
         }
         // Files
@@ -1021,6 +1043,7 @@ public static class PfsWriter
         public DirNode? Parent;
         public uint Number;
         public long DirentsBlock;
+        public long DirentBlocks = 1;
         public readonly List<DirNode> Dirs = [];
         public readonly List<FileNode> Files = [];
     }
