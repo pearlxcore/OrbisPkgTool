@@ -130,13 +130,17 @@ public static class PfsWriter
             inodeBlocks = (p - BlockSize + BlockSize - 1) / BlockSize;
         }
 
+        // FPT size and block count needed for the layout below.
+        long fptSize = (dirs.Count + fileNodes.Count) * 8;
+
         // Block layout (matches real orbis): 0=header, 1..N=inode table,
-        //   N+1=superroot dirents, N+2=fpt, N+3=empty (or collision_resolver
-        //   when a hash collision exists — LibOrbisPkg reference), N+4=uroot
+        //   N+1=superroot dirents, N+2..N+2+fptBlocks-1=FPT (can span multiple
+        //   blocks — games with >8192 files need 2+ blocks),
+        //   N+2+fptBlocks=empty/collision_resolver, N+3+fptBlocks=uroot
         //   dirents, then dirs, then files.
         long superBlock = 1 + inodeBlocks;
         long fptBlock = superBlock + 1;
-        long crBlock = fptBlock + 1;       // empty block slot; resolver occupies it
+        long crBlock   = fptBlock + CeilDiv(fptSize, (int)BlockSize);
         long urootBlock = crBlock + 1;
         long nextBlock = urootBlock + 1;
         foreach (var d in dirs)
@@ -194,8 +198,6 @@ public static class PfsWriter
             dinodeBlockCount: inodeBlocks);
 
         // ---- Inode table (D32, 0xA8 each, packed) ----
-        // FPT records: 8 bytes each (uint32 hash + uint32 inode)
-        long fptSize = (dirs.Count + fileNodes.Count) * 8;
         long inodePos = BlockSize;
         void NextInode() { if (inodePos % BlockSize > BlockSize - PfsFormat.D32InodeSize) inodePos += BlockSize - (inodePos % BlockSize); }
 
@@ -203,9 +205,13 @@ public static class PfsWriter
         NextInode();
         WriteD32Inode(w, inodePos, 0x416D, 1, 0x00020010, BlockSize, 1, superBlock); inodePos += 0xA8;
 
-        // Inode 1: flat_path_table (regular file, db[0] = fpt block)
+        // Inode 1: flat_path_table (regular file, db[0] = fpt block).
+        // For games with >8192 files the FPT spans multiple blocks — the
+        // blocks field must reflect the actual allocation (was hardcoded 1,
+        // which broke orbis-imposed FPT lookups on Bloodborne-scale trees).
+        long fptBlocks = CeilDiv(fptSize, (int)BlockSize);
         NextInode();
-        WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, 1, fptBlock); inodePos += 0xA8;
+        WriteD32Inode(w, inodePos, 0x816D, 1, 0x00020010, fptSize, fptBlocks, fptBlock); inodePos += 0xA8;
 
         // Inode 2: collision_resolver (only when hasCollision)
         if (hasCollision)
