@@ -142,9 +142,16 @@ public static class PfsWriter
         // block allocation and inode sizing).
         long DirSize(DirNode d)
         {
-            long s = DirentSize(".") + DirentSize("..");
-            foreach (var c in d.Dirs) s += DirentSize(c.Name);
-            foreach (var c in d.Files) s += DirentSize(c.Name);
+            long s = 0;
+            void Add(string name) {
+                int es = DirentSize(name);
+                if (s / BlockSize != (s + es - 1) / BlockSize)
+                    s += BlockSize - (s % BlockSize);
+                s += es;
+            }
+            Add("."); Add("..");
+            foreach (var c in d.Dirs) Add(c.Name);
+            foreach (var c in d.Files) Add(c.Name);
             return s;
         }
         long urootDirentSize = DirSize(root);
@@ -940,14 +947,17 @@ public static class PfsWriter
     /// </summary>
     private static void WriteDirent(BinaryWriter w, ref long pos, long ino, PfsDirentType type, string name)
     {
-        w.BaseStream.Position = pos;
         int entSize = DirentSize(name);
+        // Never let a dirent straddle a 64KB boundary: pad the current
+        // block to its end and start fresh on the next block.
+        if (pos / BlockSize != (pos + entSize - 1) / BlockSize)
+            pos += BlockSize - (pos % BlockSize);
+        w.BaseStream.Position = pos;
         WriteLe(w, (uint)ino);
         WriteLe(w, (int)type);
         WriteLe(w, name.Length);
         WriteLe(w, entSize);
         w.Write(System.Text.Encoding.ASCII.GetBytes(name));
-        // Note: name is NOT null-terminated (matches original orbis behavior)
         pos += entSize;
     }
 
