@@ -417,7 +417,11 @@ public sealed class PkgReader : IDisposable
             }
             else
             {
-                var entry = FindSc0Entry(Unprefix(f.Path))!;
+                // Prefer the exact entry by ID (unnamed entries are listed
+                // with synthetic "entry_XXXX.bin" names that FindSc0Entry
+                // cannot resolve by name).
+                var entry = _entries.FirstOrDefault(e => e.Id == (uint)f.EntryId)
+                    ?? FindSc0Entry(Unprefix(f.Path))!;
                 var data = ReadEntryData(entry);
                 File.WriteAllBytes(dest, data);
             }
