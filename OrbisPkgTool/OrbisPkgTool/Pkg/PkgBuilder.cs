@@ -84,7 +84,9 @@ public static class PkgBuilder
         foreach (var (sc0Path, _) in sc0Files)
         {
             int slash = sc0Path.LastIndexOf('/');
-            if (slash > 0)
+            // "app/" (patch playgo) exists ONLY in the Sc0 layer — the
+            // original's PFS has no sce_sys/app directory.
+            if (slash > 0 && !sc0Path.StartsWith("app/", StringComparison.OrdinalIgnoreCase))
                 needDirs.Add("sce_sys/" + sc0Path[..slash]);
         }
         // Sony always ships sce_sys/about/ (right.sprx) — our restructure
