@@ -254,9 +254,17 @@ public sealed class PkgReader : IDisposable
         foreach (var e in _entries)
         {
             string? name = ResolveName(e);
+            string path;
             if (string.IsNullOrEmpty(name))
-                continue;
-            string path = PrefixSc0(name);
+            {
+                // Unnamed entries (e.g. delta-info 0x0408, playgo 0x1008) are
+                // carried through with a synthetic name so no content is lost.
+                path = $"Sc0/entry_{e.Id:X4}.bin";
+            }
+            else
+            {
+                path = PrefixSc0(name);
+            }
             result.Add(new PkgFileEntry
             {
                 Path = path,

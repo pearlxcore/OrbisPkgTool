@@ -188,7 +188,7 @@ public static class PkgBuilder
             // 4. Assemble PKG → output file
             AssembleToFile(project, pfsFiles, outerPath, passcode, dk, innerSize, sc0Files, outputPath, ct,
                 (done, total) => options.Progress?.Invoke(BuildStage.Assemble, done, total),
-                outerDataStart: outerDataStart);
+                outerDataStart: outerDataStart, options: options);
 
             if (options.Validate)
                 PkgValidator.ValidatePkgFile(outputPath, passcode);
@@ -257,8 +257,9 @@ public static class PkgBuilder
         string outerPfsPath, string passcode, byte[][] dk, long innerPfsSize,
         List<(string Path, byte[] Data)>? sc0Files, string outputPath,
         System.Threading.CancellationToken ct = default, Action<long, long>? progress = null,
-        long outerDataStart = 0)
+        long outerDataStart = 0, BuildOptions? options = null)
     {
+        options ??= new BuildOptions();
         // Build the entry list + table in memory (entry data is small).
         var entries = BuildAssembleEntries(project, files, passcode, dk, innerPfsSize, sc0Files);
         entries = entries.OrderBy(e => e.Id).ToList();
@@ -421,8 +422,8 @@ public static class PkgBuilder
         var cid = Encoding.ASCII.GetBytes(project.ContentId);
         Buffer.BlockCopy(cid, 0, hdr, 0x40, Math.Min(cid.Length, 48));
         WriteBe32(hdr, 0x70, 0x0000000F);
-        WriteBe32(hdr, 0x74, (uint)(project.VolumeType == VolumeType.PkgPs4Patch ? 0x1E : project.VolumeType == VolumeType.PkgPs4App ? 0x1A : 0x1B));
-        WriteBe32(hdr, 0x78, project.VolumeType == VolumeType.PkgPs4Patch ? 0x48000000u : 0x0A000000u);
+        WriteBe32(hdr, 0x74, options.ContentTypeOverride ?? (uint)(project.VolumeType == VolumeType.PkgPs4Patch ? 0x1E : project.VolumeType == VolumeType.PkgPs4App ? 0x1A : 0x1B));
+        WriteBe32(hdr, 0x78, options.ContentFlagsOverride ?? (project.VolumeType == VolumeType.PkgPs4Patch ? 0x48000000u : 0x0A000000u));
         // promote_size = pfs_image_offset — verified against original FPKGs
         // (Children of Morta 0xD00000, Digimon 0xB00000, Disgaea 0x80000,
         // Adventure Time 0x2780000 — always equals the PFS image offset).
@@ -562,12 +563,36 @@ public static class PkgBuilder
         {
             string rel = Path.GetRelativePath(sceSys, file).Replace('\\', '/');
             if (present.Contains(rel)) continue;
-            // Only add files with a known entry ID (param.sfo handled separately).
-            uint id = PkgEntryNames.Known.FirstOrDefault(kv => kv.Value == rel).Key;
-            if (id == 0) continue;
+            // Only add files with a resolvable entry ID (param.sfo handled separately).
+            if (ResolveSc0EntryId(rel) == 0) continue;
             sc0Files.Add((rel, File.ReadAllBytes(file)));
             present.Add(rel);
         }
+    }
+
+    /// <summary>
+    /// Maps an sce_sys-relative Sc0 file name to its PKG entry ID.
+    /// - Known names (icon0.png, nptitle.dat, ...) → known table.
+    /// - changeinfo/changeinfo_XX.xml → 0x1260 + XX + 1 (Sony convention:
+    ///   changeinfo.xml=0x1260, changeinfo_02.xml=0x1263, ...).
+    /// - entry_XXXX.bin → carried-through unnamed entries (ID in the name).
+    /// </summary>
+    private static uint ResolveSc0EntryId(string name)
+    {
+        var known = PkgEntryNames.Known.FirstOrDefault(kv => kv.Value == name).Key;
+        if (known != 0) return known;
+
+        var ci = System.Text.RegularExpressions.Regex.Match(name,
+            @"^changeinfo/changeinfo_(\d+)\.xml$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (ci.Success && int.TryParse(ci.Groups[1].Value, out int n) && n >= 1 && n <= 30)
+            return 0x1260u + (uint)n + 1;
+
+        var carried = System.Text.RegularExpressions.Regex.Match(name,
+            @"^entry_([0-9A-Fa-f]{4})\.bin$");
+        if (carried.Success)
+            return Convert.ToUInt32(carried.Groups[1].Value, 16);
+
+        return 0;
     }
 
     /// <summary>
@@ -611,8 +636,13 @@ public static class PkgBuilder
         entries.Add(new BuildEntry { Id = PkgEntryIds.Metas, Data = new byte[0] });
         entries.Add(new BuildEntry { Id = PkgEntryIds.EntryNames, Data = new byte[0] });
 
-        entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseDat, Data = new byte[0x400], KeyIndex = 3, Encrypted = true });
-        entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseInfo, Data = new byte[0x200], KeyIndex = 2, Encrypted = true });
+        // Patch PKGs carry no license.dat/license.info (verified against the
+        // original patch) — only base apps get the fixed placeholders.
+        if (project.VolumeType != VolumeType.PkgPs4Patch)
+        {
+            entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseDat, Data = new byte[0x400], KeyIndex = 3, Encrypted = true });
+            entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseInfo, Data = new byte[0x200], KeyIndex = 2, Encrypted = true });
+        }
         entries.Add(new BuildEntry { Id = PkgEntryIds.PsReservedDat, Data = new byte[0x2000] });
 
         var sfo = new ParamSfo();
@@ -645,7 +675,7 @@ public static class PkgBuilder
         sc0Files ??= [];
         foreach (var (name, data) in sc0Files)
         {
-            uint id = PkgEntryNames.Known.FirstOrDefault(kv => kv.Value == name).Key;
+            uint id = ResolveSc0EntryId(name);
             if (id == 0) continue;
             bool enc = id is PkgEntryIds.LicenseDat or PkgEntryIds.LicenseInfo
                 or PkgEntryIds.NpBindDat or PkgEntryIds.NpTitleDat
@@ -806,8 +836,10 @@ public static class PkgBuilder
 
     private static byte[] Assemble(Gp4Project project, List<(string Path, byte[] Data)> files,
         byte[] outerPfs, string passcode, byte[][] dk, long innerPfsSize,
-        List<(string Path, byte[] Data)>? sc0Files = null, long outerDataStart = 0)
+        List<(string Path, byte[] Data)>? sc0Files = null, long outerDataStart = 0,
+        BuildOptions? options = null)
     {
+        options ??= new BuildOptions();
         var entries = new List<BuildEntry>();
 
         // Meta entries
@@ -819,8 +851,13 @@ public static class PkgBuilder
         entries.Add(new BuildEntry { Id = PkgEntryIds.EntryNames, Data = new byte[0] });
 
         // System entries
-        entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseDat, Data = new byte[0x400], KeyIndex = 3, Encrypted = true });
-        entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseInfo, Data = new byte[0x200], KeyIndex = 2, Encrypted = true });
+        // Patch PKGs carry no license.dat/license.info (verified against the
+        // original patch) — only base apps get the fixed placeholders.
+        if (project.VolumeType != VolumeType.PkgPs4Patch)
+        {
+            entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseDat, Data = new byte[0x400], KeyIndex = 3, Encrypted = true });
+            entries.Add(new BuildEntry { Id = PkgEntryIds.LicenseInfo, Data = new byte[0x200], KeyIndex = 2, Encrypted = true });
+        }
         entries.Add(new BuildEntry { Id = PkgEntryIds.PsReservedDat, Data = new byte[0x2000] });
 
         // param.sfo
@@ -1025,8 +1062,8 @@ public static class PkgBuilder
         var cid = Encoding.ASCII.GetBytes(project.ContentId);
         Buffer.BlockCopy(cid, 0, pkg, 0x40, Math.Min(cid.Length, 48));
         WriteBe32(pkg, 0x70, 0x0000000F);
-        WriteBe32(pkg, 0x74, (uint)(project.VolumeType == VolumeType.PkgPs4Patch ? 0x1E : project.VolumeType == VolumeType.PkgPs4App ? 0x1A : 0x1B));
-        WriteBe32(pkg, 0x78, project.VolumeType == VolumeType.PkgPs4Patch ? 0x48000000u : 0x0A000000u);
+        WriteBe32(pkg, 0x74, options.ContentTypeOverride ?? (uint)(project.VolumeType == VolumeType.PkgPs4Patch ? 0x1E : project.VolumeType == VolumeType.PkgPs4App ? 0x1A : 0x1B));
+        WriteBe32(pkg, 0x78, options.ContentFlagsOverride ?? (project.VolumeType == VolumeType.PkgPs4Patch ? 0x48000000u : 0x0A000000u));
         // promote_size = pfs_image_offset (matches original FPKGs)
         WriteBe32(pkg, 0x7C, (uint)pfsOffset);
         WriteBe32(pkg, 0x80, 0x20161020);

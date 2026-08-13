@@ -911,6 +911,7 @@ static void RunRepack(string[] args)
         // ── 1. Extract ──────────────────────────────────────────
         Console.WriteLine("[1/5] Extracting PKG...");
         bool isPatch = false;
+        uint origContentType = 0, origContentFlags = 0;
         using (var reader = new PkgReader(pkg, passcode))
         {
             if (reader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
@@ -919,9 +920,15 @@ static void RunRepack(string[] args)
             // Detect patch PKGs (CATEGORY "gp" or content type 0x1E) so the
             // generated GP4 uses pkg_ps4_patch — otherwise the rebuilt PKG
             // is mislabeled as a base app.
-            isPatch = reader.GetInfo().Type == PkgType.Patch;
+            var info = reader.GetInfo();
+            isPatch = info.Type == PkgType.Patch;
             if (isPatch)
                 Console.WriteLine("  Detected: patch PKG (pkg_ps4_patch)");
+            // Carry the ORIGINAL content_type/content_flags through — Sony
+            // patches keep content_type=0x1A with patch FLAGS, and the exact
+            // flag set (CUMULATIVE/FIRST/etc.) matters to orbis.
+            origContentType = info.ContentType;
+            origContentFlags = info.ContentFlags;
 
             Directory.CreateDirectory(dumpDir);
             int done = 0, total = 0;
@@ -967,6 +974,8 @@ static void RunRepack(string[] args)
         Console.WriteLine("[4/5] Building PKG (pure C#)...");
         var buildArgs = new List<string> { gp4Path, image0Dir, "--out", outFile, "--passcode", passcode };
         if (pfscMode != "store") { buildArgs.Add("--pfsc-mode"); buildArgs.Add(pfscMode); }
+        if (origContentType != 0)  { buildArgs.Add("--content-type"); buildArgs.Add($"0x{origContentType:X}"); }
+        if (origContentFlags != 0) { buildArgs.Add("--content-flags"); buildArgs.Add($"0x{origContentFlags:X}"); }
         RunPkgBuild(buildArgs.ToArray());
         // A failed build (e.g. OutOfMemory on huge games) leaves NO output file —
         // stop immediately instead of throwing a confusing secondary error.
@@ -1321,6 +1330,7 @@ static void RunPkgBuild(string[] args)
     bool validate = false;
     string pfscMode = "store";
     string? manifest = null;
+    uint? contentTypeOverride = null, contentFlagsOverride = null;
     for (int i = 0; i < args.Length; i++)
     {
         switch (args[i])
@@ -1330,6 +1340,10 @@ static void RunPkgBuild(string[] args)
             case "--validate": validate = true; break;
             case "--pfsc-mode" when i + 1 < args.Length: pfscMode = args[++i]; break;
             case "--manifest" when i + 1 < args.Length: manifest = args[++i]; break;
+            case "--content-type" when i + 1 < args.Length:
+                contentTypeOverride = ParseHexU32(args[++i]); break;
+            case "--content-flags" when i + 1 < args.Length:
+                contentFlagsOverride = ParseHexU32(args[++i]); break;
             default:
                 if (!args[i].StartsWith('-'))
                 {
@@ -1358,6 +1372,8 @@ static void RunPkgBuild(string[] args)
             Passcode = passcode,
             PfscMode = pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase)
                 ? OrbisPkgTool.Pkg.PfscMode.Compressed : OrbisPkgTool.Pkg.PfscMode.Store,
+            ContentTypeOverride = contentTypeOverride,
+            ContentFlagsOverride = contentFlagsOverride,
             Validate = validate,
             ManifestPath = manifest,
             CancellationToken = cts.Token,
@@ -1399,6 +1415,15 @@ static int SafeWindowWidth()
 {
     try { return Math.Min(Console.WindowWidth - 1, 120); }
     catch { return 120; }
+}
+
+/// <summary>Parses "0x1A" / "26" style CLI values into a uint32.</summary>
+static uint ParseHexU32(string s)
+{
+    s = s.Trim();
+    if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        return Convert.ToUInt32(s[2..], 16);
+    return Convert.ToUInt32(s, 10);
 }
 
 /// <summary>Structured 8-stage validation of a built PKG ("validate" / "--validate").</summary>

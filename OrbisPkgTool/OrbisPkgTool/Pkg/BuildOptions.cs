@@ -30,6 +30,16 @@ public sealed class BuildOptions
     /// <summary>PFSC storage mode. Default: Store (stable until console testing).</summary>
     public PfscMode PfscMode { get; set; } = PfscMode.Store;
 
+    /// <summary>
+    /// Optional content_type (0x74) override — repack carries the original
+    /// PKG's value through. Sony patches keep content_type=0x1A with patch
+    /// FLAGS rather than switching to 0x1E.
+    /// </summary>
+    public uint? ContentTypeOverride { get; set; }
+
+    /// <summary>Optional content_flags (0x78) override (repack carries it).</summary>
+    public uint? ContentFlagsOverride { get; set; }
+
     /// <summary>Run the 8-stage structured validation on the finished PKG.</summary>
     public bool Validate { get; set; }
 
