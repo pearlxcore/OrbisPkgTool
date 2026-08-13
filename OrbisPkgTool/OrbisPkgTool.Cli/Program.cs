@@ -898,7 +898,7 @@ static void RunRepack(string[] args)
         // old Substring(0,60) cut the GUID off and the update repack reused
         // the base game's dump, cross-contaminating the two).
         if (safe.Length > 40) safe = safe[..40];
-        workDir = Path.Combine(Path.GetTempPath(), $"pkg_repack_{safe}_{Guid.NewGuid():N[..12]}");
+        workDir = Path.Combine(Path.GetTempPath(), $"pkg_repack_{safe}_{Guid.NewGuid().ToString("N")[..12]}");
     }
     Directory.CreateDirectory(workDir);
     string dumpDir   = Path.Combine(workDir, "dump");
