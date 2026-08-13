@@ -253,6 +253,11 @@ public sealed class PkgReader : IDisposable
         var result = new List<PkgFileEntry>();
         foreach (var e in _entries)
         {
+            // Meta/table entries are not content files — never expose them.
+            if (e.Id is PkgEntryIds.Digests or PkgEntryIds.EntryKeys
+                or PkgEntryIds.ImageKey or PkgEntryIds.GeneralDigests
+                or PkgEntryIds.Metas or PkgEntryIds.EntryNames)
+                continue;
             string? name = ResolveName(e);
             string path;
             if (string.IsNullOrEmpty(name))
