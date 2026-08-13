@@ -893,7 +893,12 @@ static void RunRepack(string[] args)
         // Sanitise just enough for a folder name (replace truly hostile chars)
         var safe = new string(baseName.Select(c =>
                 Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray());
-        workDir = Path.Combine(Path.GetTempPath(), $"pkg_repack_{safe}_{Guid.NewGuid():N}".Substring(0, 60));
+        // Truncate the NAME, never the GUID: two different PKGs whose names
+        // share a 60-char prefix must not collide on the same work dir (the
+        // old Substring(0,60) cut the GUID off and the update repack reused
+        // the base game's dump, cross-contaminating the two).
+        if (safe.Length > 40) safe = safe[..40];
+        workDir = Path.Combine(Path.GetTempPath(), $"pkg_repack_{safe}_{Guid.NewGuid():N[..12]}");
     }
     Directory.CreateDirectory(workDir);
     string dumpDir   = Path.Combine(workDir, "dump");
