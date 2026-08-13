@@ -52,10 +52,10 @@ public static class PkgBuilder
             if (f.TargPath.StartsWith("sce_sys/", StringComparison.OrdinalIgnoreCase))
             {
                 string rel = f.TargPath["sce_sys/".Length..];
-                // Only files with a KNOWN Sc0 entry ID become PKG entries;
+                // Only files with a resolvable Sc0 entry ID become PKG entries;
                 // everything else under sce_sys/ (e.g. about/right.sprx)
                 // belongs in the inner PFS so no content is lost.
-                if (PkgEntryNames.Known.Values.Contains(rel, StringComparer.OrdinalIgnoreCase))
+                if (ResolveSc0EntryId(rel) != 0)
                     sc0Files.Add((rel, File.ReadAllBytes(src)));
                 else
                     pfsFiles.Add(new PfsSourceFile("sce_sys/" + rel, src, len));
