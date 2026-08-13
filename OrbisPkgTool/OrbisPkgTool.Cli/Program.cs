@@ -816,12 +816,12 @@ static void RunRestructure(string[] args)
         }
     }
 
-    // 3. Delete about/ dir (Sony generates sce_sys/about/right.sprx)
+    // 3. Keep about/ — right.sprx belongs in the PFS for full content parity.
+    // (Sony's img_create rejects user-provided copies, but OUR builder can
+    // carry the original through. Only the harness's Sony-rebuild path needs
+    // the cleanup, which it performs itself.)
     if (Directory.Exists(aboutDir))
-    {
-        Directory.Delete(aboutDir, recursive: true);
-        Console.WriteLine($"  Delete: {Path.GetRelativePath(root, aboutDir)}");
-    }
+        Console.WriteLine($"  Keep: {Path.GetRelativePath(root, aboutDir)} (right.sprx preserved for PFS)");
 
     Console.WriteLine();
     Console.WriteLine("Restructure complete. Ready for gp4gen.");

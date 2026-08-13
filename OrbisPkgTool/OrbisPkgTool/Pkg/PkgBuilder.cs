@@ -51,8 +51,14 @@ public static class PkgBuilder
             totalSize += len;
             if (f.TargPath.StartsWith("sce_sys/", StringComparison.OrdinalIgnoreCase))
             {
-                // Sc0 files are small (KB-MB); keep the memory-backed list.
-                sc0Files.Add((f.TargPath["sce_sys/".Length..], File.ReadAllBytes(src)));
+                string rel = f.TargPath["sce_sys/".Length..];
+                // Only files with a KNOWN Sc0 entry ID become PKG entries;
+                // everything else under sce_sys/ (e.g. about/right.sprx)
+                // belongs in the inner PFS so no content is lost.
+                if (PkgEntryNames.Known.Values.Contains(rel, StringComparer.OrdinalIgnoreCase))
+                    sc0Files.Add((rel, File.ReadAllBytes(src)));
+                else
+                    pfsFiles.Add(new PfsSourceFile("sce_sys/" + rel, src, len));
             }
             else
             {
