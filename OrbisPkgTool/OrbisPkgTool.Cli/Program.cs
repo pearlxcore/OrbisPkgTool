@@ -910,10 +910,18 @@ static void RunRepack(string[] args)
     {
         // ── 1. Extract ──────────────────────────────────────────
         Console.WriteLine("[1/5] Extracting PKG...");
+        bool isPatch = false;
         using (var reader = new PkgReader(pkg, passcode))
         {
             if (reader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
                 Console.Error.WriteLine($"[warn] {reader.PasscodeStatus}");
+
+            // Detect patch PKGs (CATEGORY "gp" or content type 0x1E) so the
+            // generated GP4 uses pkg_ps4_patch — otherwise the rebuilt PKG
+            // is mislabeled as a base app.
+            isPatch = reader.GetInfo().Type == PkgType.Patch;
+            if (isPatch)
+                Console.WriteLine("  Detected: patch PKG (pkg_ps4_patch)");
 
             Directory.CreateDirectory(dumpDir);
             int done = 0, total = 0;
@@ -948,6 +956,7 @@ static void RunRepack(string[] args)
         // ── 4. Generate GP4 ─────────────────────────────────────
         Console.WriteLine("[3/5] Generating GP4 project...");
         var gp4Args = new List<string> { image0Dir, "--out", gp4Path };
+        if (isPatch)            { gp4Args.Add("--patch"); }
         if (title != null)      { gp4Args.Add("--title");      gp4Args.Add(title); }
         if (titleId != null)    { gp4Args.Add("--title-id");   gp4Args.Add(titleId); }
         if (contentId != null)  { gp4Args.Add("--content-id"); gp4Args.Add(contentId); }
