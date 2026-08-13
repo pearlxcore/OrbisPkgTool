@@ -232,6 +232,15 @@ public sealed class Gp4Project
             string rel = Path.GetRelativePath(folder, f).Replace('\\', '/');
             proj.Files.Add(new Gp4File { TargPath = rel, OrigPath = rel });
         }
+        // EMPTY directories exist in the source tree (e.g. patch PKGs carry
+        // mono/etc/ dirs with no files). Encode them as trailing-slash paths —
+        // the builder synthesizes them into the PFS tree (see PfsWriter).
+        foreach (var d in Directory.EnumerateDirectories(folder, "*", SearchOption.AllDirectories))
+        {
+            if (Directory.EnumerateFileSystemEntries(d).Any()) continue; // not empty
+            string rel = Path.GetRelativePath(folder, d).Replace('\\', '/');
+            proj.Files.Add(new Gp4File { TargPath = rel + "/", OrigPath = rel + "/" });
+        }
         return proj;
     }
 

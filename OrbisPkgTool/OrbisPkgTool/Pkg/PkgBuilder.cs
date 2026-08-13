@@ -45,6 +45,13 @@ public static class PkgBuilder
         foreach (var f in project.Files)
         {
             if (f.TargPath == "sce_sys/param.sfo") continue;
+            // Trailing-slash entries are EMPTY DIRECTORIES (from gp4gen) —
+            // carry them into the PFS tree as dir-only entries.
+            if (f.TargPath.EndsWith('/'))
+            {
+                pfsFiles.Add(new PfsSourceFile(f.TargPath, "", 0));
+                continue;
+            }
             string src = ResolveSource(projectFolder, f.OrigPath);
             if (!File.Exists(src)) continue;
             long len = new FileInfo(src).Length;
