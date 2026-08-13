@@ -808,7 +808,10 @@ static void RunRestructure(string[] args)
         var appPath = Path.Combine(sceSys, "app", f);
         foreach (string p in new[] { path, appPath })
         {
-            if (File.Exists(p))
+            // app/playgo-chunk.dat (entry 0x1008) is PATCH-ONLY content that
+            // the original carries — only the root playgo files are
+            // Sony-regenerated. Keep the app/ variant.
+            if (File.Exists(p) && !(p == appPath && f == "playgo-chunk.dat"))
             {
                 File.Delete(p);
                 Console.WriteLine($"  Delete: {Path.GetRelativePath(root, p)}");
