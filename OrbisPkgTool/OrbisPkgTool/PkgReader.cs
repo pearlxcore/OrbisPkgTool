@@ -404,7 +404,14 @@ public sealed class PkgReader : IDisposable
     /// <summary>Extracts all files (Sc0 + Image0) to the output directory.</summary>
     public void ExtractAll(string outputDirectory, IProgress<(int Current, int Total, string CurrentFile)>? progress = null)
     {
-        var files = ListFiles().Where(f => !f.IsDirectory).ToList();
+        var all = ListFiles();
+        // Empty directories (e.g. patch PKGs' Media/Plugins, mono/etc/) exist
+        // only as tree nodes — materialize them so the dump preserves the
+        // full tree and the rebuild carries them through.
+        foreach (var d in all.Where(f => f.IsDirectory))
+            Directory.CreateDirectory(Path.Combine(outputDirectory,
+                d.Path.Replace('/', Path.DirectorySeparatorChar)));
+        var files = all.Where(f => !f.IsDirectory).ToList();
         int i = 0;
         foreach (var f in files)
         {
