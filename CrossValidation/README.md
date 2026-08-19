@@ -35,7 +35,28 @@ exact mismatch — do not silently patch production code.
 # extractor validity, roundtrips (ours→Sony, ours→OpenOrbis,
 # OpenOrbis→ours, OpenOrbis→Sony control), GP4 semantics, inner/outer PFS:
 .\CrossValidation\Run-FullValidation.ps1
+
+# Compression-parity — repack with policy replay, then the cross-tool
+# matrix (ours + Sony + OpenOrbis: list, validate, extract) + PFSC
+# policy diff + round-trip idempotency. Uses compression_config.json:
+.\CrossValidation\Run-CompressionParity.ps1 [-Only "2,3,4,6"]
+#  -Only: run just the numbered stages (1=repack+profile, 2=readers,
+#    3=validators, 4=triple extraction, 5=six-path comparison,
+#    6=PFSC policy diff, 7=round-trip). Full run needs ~5× the pkg size.
+
+# Repack-parity smoke test — the fast one-shot: repack + our validate +
+# Sony img_verify + Sony img_file_list + pfscprofile --ref. No config:
+.\CrossValidation\Run-RepackParity.ps1 <original.pkg> [-Out rebuilt.pkg]
 ```
+
+`Run-CompressionParity.ps1` reuses the same Environment/ToolRunners/
+ManifestHelpers shared infrastructure, so its output directory mirrors the
+other runs (timestamped under `Results/`). It is the **primary cross-tool
+gate for compression-policy work**: Stage 1 repacks with policy replay,
+Stage 6 runs `pfscprofile --ref` to confirm 0 policy mismatches vs the
+original, Stage 4 proves Sony `img_extract` produces byte-identical files
+(the strongest PC-side PS4-installer proxy), and Stage 7 confirms the
+replay is idempotent (re-repacking the rebuild yields the same policy).
 
 Each run creates a unique timestamped directory under `Results/`:
 
@@ -54,6 +75,11 @@ interleaved; nothing discarded).
 
 ## Notes
 
+- **Compression-parity config**: copy `compression_config.example.json` to
+  `compression_config.json`. Set `reference_pkg` to the ORIGINAL package
+  (the policy source). With `skip_rebuild: false` (default) the script
+  repacks it with policy replay; with `skip_rebuild: true` + `ours_pkg`
+  it validates an existing rebuild instead.
 - **Sony paths**: orbis-pub-cmd 3.87 fails on some Unicode paths (U+FF1A).
   Packages are copied to an ASCII-safe work path before Sony operations;
   source files are never altered.
@@ -78,5 +104,7 @@ interleaved; nothing discarded).
 - `CROSS_IMPLEMENTATION_VALIDATED` — + OpenOrbis.
 - `PC_MAXIMUM_VALIDATED` — all of the above agree on readability, validation,
   extraction contents, and at least one roundtrip.
+- `REPACK_PARITY_PASS` — `Run-RepackParity.ps1` fast smoke pass (repack +
+  our validate + Sony img_verify + img_file_list + 0 policy mismatches).
 - `CONSOLE_VALIDATED` — reserved for the actual jailbroken-PS4 install test
   (see `../docs/CONSOLE_VALIDATION_CHECKLIST.md`).
