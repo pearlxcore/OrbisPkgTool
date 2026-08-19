@@ -10,12 +10,60 @@ namespace OrbisPkgTool.Pfs;
 /// Blocks that do not compress (stream size >= block size) are stored raw.
 /// The block table holds absolute offsets; all header fields are little-endian
 /// (validated against real FPKGs).
+///
+/// Per-file policy: a PfsBuildResult allocation manifest maps files to their
+/// PFS block ranges. Files marked raw (e.g. GP4 pfs_compression="disable",
+/// replayed from the original package's profile) have EVERY allocated block
+/// stored uncompressed; structural blocks (header/inodes/dirents/FPT) and
+/// enabled files compress normally with raw fallback for incompressible data.
 /// </summary>
 public static class PFSCWriter
 {
+    /// <summary>
+    /// A set of PFS block indexes that must be stored RAW regardless of
+    /// compressibility. Thread-safe bitmap (long bits per element).
+    /// </summary>
+    public sealed class RawBlockSet
+    {
+        private readonly long[] _bits;
+
+        public RawBlockSet(long blockCount)
+        {
+            _bits = new long[(blockCount >> 6) + 1];
+        }
+
+        public void AddRange(long start, long count)
+        {
+            for (long b = start; b < start + count; b++)
+                if (b >= 0)
+                    _bits[b >> 6] |= 1L << (int)(b & 63);
+        }
+
+        public bool Contains(long block) =>
+            block >= 0 && (block >> 6) < _bits.Length && (_bits[block >> 6] & (1L << (int)(block & 63))) != 0;
+    }
+
+    /// <summary>
+    /// Builds the raw-block set from an allocation manifest + per-file policy:
+    /// every block allocated to a "disable" file is stored raw.
+    /// </summary>
+    public static RawBlockSet BuildRawBlockSet(PfsBuildResult allocation,
+        IReadOnlyDictionary<string, PfscPolicy> policy)
+    {
+        var set = new RawBlockSet(allocation.BlockCount);
+        foreach (var f in allocation.Files)
+        {
+            if (!policy.TryGetValue(PfscProfiler.NormalizeKey(f.Path), out var p) || p != PfscPolicy.Disable)
+                continue;
+            set.AddRange(f.StartBlock, f.BlockCount);
+        }
+        return set;
+    }
+
     /// <summary>Stream-based PFSC build for images that don't fit in memory.</summary>
     public static void BuildToStream(Stream pfsImage, Stream output, bool storeAllRaw = true,
-        System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
+        System.Threading.CancellationToken ct = default, Action<long, long>? progress = null,
+        RawBlockSet? rawBlocks = null)
     {
         const int blockSize = (int)PfsFormat.BlockSize;
         long total = pfsImage.Length;
@@ -66,8 +114,9 @@ public static class PFSCWriter
                 output.Position = tableOffset + i * 8;
                 WriteLe(output, (ulong)(dataOffset + Math.Min((long)i * blockSize, total)));
             }
+            return;
         }
-        else
+
         {
             var table = new ulong[blockCount + 1];
             var raw = new byte[blockSize];
@@ -80,27 +129,23 @@ public static class PFSCWriter
                 progress?.Invoke(dataPos - dataOffset, total);
                 long remain = total - (long)i * blockSize;
                 int len = (int)Math.Min((long)blockSize, remain);
-                pfsImage.Read(raw, 0, len);
-                var deflater = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(6, noZlibHeaderOrFooter: true);
-                deflater.SetInput(raw, 0, len);
-                deflater.Finish();
-                using var z = new MemoryStream();
-                var compBuf = new byte[blockSize];
-                int n;
-                while ((n = deflater.Deflate(compBuf)) > 0) z.Write(compBuf, 0, n);
-                var comp = z.ToArray();
-                if (comp.Length + 6 >= blockSize)
+                pfsImage.ReadExactly(raw, 0, len);
+                bool forceRaw = rawBlocks?.Contains(i) ?? false;
+                if (!forceRaw)
                 {
-                    output.Write(raw, 0, blockSize);
-                    dataPos += blockSize;
+                    var comp = CompressBlock(raw, 0, len);
+                    if (comp != null)
+                    {
+                        output.Write(comp, 0, comp.Length);
+                        dataPos += comp.Length;
+                        table[i + 1] = (ulong)dataPos;
+                        continue;
+                    }
                 }
-                else
-                {
-                    output.WriteByte(0x48); output.WriteByte(0x89);
-                    output.Write(comp, 0, comp.Length);
-                    WriteBe(output, Adler32(raw.AsSpan(0, len)));
-                    dataPos += comp.Length + 6;
-                }
+                // Raw fallback: full blockSize always (the PFS image is block-aligned,
+                // so the last block is exactly blockSize too).
+                output.Write(raw, 0, blockSize);
+                dataPos += blockSize;
                 table[i + 1] = (ulong)dataPos;
             }
             // Table (entry 0 = dataOffset, then each block's end offset).
@@ -122,7 +167,7 @@ public static class PFSCWriter
             (byte)(v >> 32), (byte)(v >> 40), (byte)(v >> 48), (byte)(v >> 56),
         }, 0, 8);
 
-    public static byte[] Build(byte[] pfsImage, bool storeAllRaw = false)
+    public static byte[] Build(byte[] pfsImage, bool storeAllRaw = false, RawBlockSet? rawBlocks = null)
     {
         const int blockSize = (int)PfsFormat.BlockSize;
         int blockCount = (pfsImage.Length + blockSize - 1) / blockSize;
@@ -137,18 +182,6 @@ public static class PFSCWriter
         for (int i = 0; i < blockCount; i++)
         {
             int len = Math.Min(blockSize, pfsImage.Length - i * blockSize);
-            using var z = new MemoryStream();
-            // RAW deflate (no zlib wrapper). Verified against real orbis output:
-            // orbis PFSC blocks start with raw deflate (e.g. 0x48 0x89), NOT a
-            // zlib header (0x78 0x9C). LibOrbisPkg's reader skips 2 bytes then
-            // raw-deflates, which matches this format.
-            // Real orbis PFSC: blocks that don't compress (compressed size >=
-            // block size) are stored RAW (uncompressed, exactly blockSize bytes).
-            // Compressed blocks use zlib's raw deflate WITHOUT a zlib header —
-            // orbis output starts with BFINAL=0 dynamic-Huffman streams
-            // (first bytes 0x48 0x89 ...). .NET DeflateStream produces BFINAL=1
-            // streams that orbis's decoder rejects, so we use SharpZipLib's
-            // raw Deflater with the same zlib semantics.
             if (storeAllRaw)
             {
                 // Diagnostic: store every block raw (no compression).
@@ -157,38 +190,30 @@ public static class PFSCWriter
                 dataSize += compressedBlocks[i].Length;
                 continue;
             }
-            // Raw deflate (no zlib header), matching orbis PFSC block format.
-            // Level 6 = zlib default — verified byte-identical to orbis output
-            // (orbis blocks = 0x48 0x89 + level-6 raw deflate).
-            var deflater = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(6, noZlibHeaderOrFooter: true);
-            deflater.SetInput(pfsImage, i * blockSize, len);
-            deflater.Finish();
-            var compBuf = new byte[blockSize];
-            int n;
-            using (z)
-            {
-                while ((n = deflater.Deflate(compBuf)) > 0)
-                    z.Write(compBuf, 0, n);
-            }
-            var comp = z.ToArray();
-            if (comp.Length + 6 >= blockSize)
+            // Per-file policy: blocks belonging to "disable" files are stored
+            // raw without even attempting compression (matches orbis behavior
+            // for pfs_compression="disable" files).
+            bool forceRaw = rawBlocks?.Contains(i) ?? false;
+            if (forceRaw)
             {
                 compressedBlocks[i] = new byte[blockSize];
                 Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
+                dataSize += compressedBlocks[i].Length;
+                continue;
+            }
+            // Complete zlib stream: 0x48 0x89 header + raw deflate +
+            // big-endian Adler32 of the decompressed block (orbis format,
+            // verified against real orbis PFSC sectors). Blocks that fail to
+            // compress below the block size fall back to raw.
+            var comp = CompressBlock(pfsImage, i * blockSize, len);
+            if (comp != null)
+            {
+                compressedBlocks[i] = comp;
             }
             else
             {
-                // Complete zlib stream: 0x48 0x89 header + raw deflate +
-                // big-endian Adler32 of the decompressed block (orbis format,
-                // verified against real orbis PFSC sectors).
-                compressedBlocks[i] = new byte[comp.Length + 6];
-                compressedBlocks[i][0] = 0x48; compressedBlocks[i][1] = 0x89;
-                Buffer.BlockCopy(comp, 0, compressedBlocks[i], 2, comp.Length);
-                uint adler = Adler32(pfsImage.AsSpan(i * blockSize, len));
-                compressedBlocks[i][comp.Length + 2] = (byte)(adler >> 24);
-                compressedBlocks[i][comp.Length + 3] = (byte)(adler >> 16);
-                compressedBlocks[i][comp.Length + 4] = (byte)(adler >> 8);
-                compressedBlocks[i][comp.Length + 5] = (byte)adler;
+                compressedBlocks[i] = new byte[blockSize];
+                Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
             }
             dataSize += compressedBlocks[i].Length;
         }
@@ -219,6 +244,59 @@ public static class PFSCWriter
         foreach (var b in compressedBlocks)
             ms.Write(b, 0, b.Length);
         return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Compresses one block into the complete PFSC zlib stream (0x48 0x89 +
+    /// raw deflate + BE Adler32). Returns null when the block does not
+    /// compress (>= blockSize after wrapping) — the caller stores it raw.
+    /// Prefers zlib's 4 KiB window (deflateInit2 windowBits=-12) so the
+    /// stream is formally valid for the declared CMF window; falls back to
+    /// SharpZipLib when zlib1.dll is unavailable.
+    /// </summary>
+    internal static byte[]? CompressBlock(byte[] block, int offset, int count)
+    {
+        // Try the 4 KiB-window zlib first (formally valid for the 0x48 header).
+        // Output buffer has headroom for stored-block overhead so zlib always
+        // completes and can itself decide compressibility.
+        if (PfscDeflate.IsAvailable)
+        {
+            var zbuf = new byte[count + 128];
+            int n = PfscDeflate.TryDeflate4K(block, offset, count, zbuf);
+            if (n > 0 && n + 6 < count)
+                return WrapZlib(zbuf, n, block, offset, count);
+            if (n >= 0)
+                return null; // zlib ran: incompressible → raw
+            // n < 0: zlib failed to init (shouldn't happen) → SharpZipLib
+        }
+
+        var deflater = new ICSharpCode.SharpZipLib.Zip.Compression.Deflater(PfsFormat.PfscDeflateLevel, noZlibHeaderOrFooter: true);
+        deflater.SetInput(block, offset, count);
+        deflater.Finish();
+        using var z = new MemoryStream();
+        var compBuf = new byte[count];
+        int n2;
+        while ((n2 = deflater.Deflate(compBuf)) > 0)
+            z.Write(compBuf, 0, n2);
+        var comp = z.ToArray();
+        if (comp.Length + 6 >= count)
+            return null; // incompressible → raw fallback
+        return WrapZlib(comp, comp.Length, block, offset, count);
+    }
+
+    private static byte[]? CompressBlock(byte[] block, int count) => CompressBlock(block, 0, count);
+
+    private static byte[] WrapZlib(byte[] deflate, int deflateLen, byte[] block, int offset, int count)
+    {
+        var result = new byte[deflateLen + 6];
+        result[0] = 0x48; result[1] = 0x89;
+        Buffer.BlockCopy(deflate, 0, result, 2, deflateLen);
+        uint adler = Adler32(block.AsSpan(offset, count));
+        result[deflateLen + 2] = (byte)(adler >> 24);
+        result[deflateLen + 3] = (byte)(adler >> 16);
+        result[deflateLen + 4] = (byte)(adler >> 8);
+        result[deflateLen + 5] = (byte)adler;
+        return result;
     }
 
     /// <summary>RFC1950 Adler-32 of the decompressed block (stored big-endian).</summary>

@@ -209,9 +209,15 @@ public sealed class Gp4Project
     /// <summary>
     /// Generates a GP4 project from a folder tree (gengp4_app/gengp4_patch equivalent):
     /// every file becomes a &lt;file&gt; entry with its relative path.
+    /// When <paramref name="pfscProfile"/> is provided (captured from the
+    /// original package by PfscProfiler), its enable/disable decisions are
+    /// stamped into the generated pfs_compression attributes — making the
+    /// GP4 a faithful replay of the original's compression policy that both
+    /// OrbisPkgTool and LibOrbisPkg/orther GP4 consumers can build from.
     /// </summary>
     public static Gp4Project FromFolder(string folder, bool isPatch, string? title = null,
-        string? titleId = null, string? contentId = null, string passcode = "")
+        string? titleId = null, string? contentId = null, string passcode = "",
+        IReadOnlyDictionary<string, OrbisPkgTool.Pfs.PfscPolicy>? pfscProfile = null)
     {
         // Read metadata from the embedded param.sfo if present and not
         // overridden on the command line.
@@ -230,7 +236,11 @@ public sealed class Gp4Project
         foreach (var f in files)
         {
             string rel = Path.GetRelativePath(folder, f).Replace('\\', '/');
-            proj.Files.Add(new Gp4File { TargPath = rel, OrigPath = rel });
+            string comp = "";
+            if (pfscProfile != null && pfscProfile.TryGetValue(
+                    OrbisPkgTool.Pfs.PfscProfiler.NormalizeKey(rel), out var policy))
+                comp = policy == OrbisPkgTool.Pfs.PfscPolicy.Disable ? "disable" : "enable";
+            proj.Files.Add(new Gp4File { TargPath = rel, OrigPath = rel, PfsCompression = comp });
         }
         // EMPTY directories exist in the source tree (e.g. patch PKGs carry
         // mono/etc/ dirs with no files). Encode them as trailing-slash paths —

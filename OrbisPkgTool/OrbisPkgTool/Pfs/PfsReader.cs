@@ -191,6 +191,13 @@ public sealed class PfsReader
     }
 
     /// <summary>
+    /// Public read-only view of an inode's allocated data blocks (direct +
+    /// indirect + contiguous runs), ordered by file offset. Used by the PFSC
+    /// profiler to map file allocations onto PFSC block ranges.
+    /// </summary>
+    public IReadOnlyList<int> EnumerateFileBlocks(PfsInode ino) => EnumerateBlocks(ino);
+
+    /// <summary>
     /// Collects the data block numbers reachable through <paramref name="depth"/>
     /// levels of indirection starting at block <paramref name="block"/>.
     /// </summary>

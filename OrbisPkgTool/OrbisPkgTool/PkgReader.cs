@@ -661,6 +661,38 @@ public sealed class PkgReader : IDisposable
         CopyRawInnerPfsTo(output);
     }
 
+    /// <summary>
+    /// Opens the RAW PFSC container stream (pfs_image.dat bytes, still
+    /// XTS-encrypted-in-outer-PFS but decrypted by the outer PFS layer),
+    /// positioned at 0. Returns null when the package has no PFSC
+    /// (e.g. pfs_image.dat stored uncompressed) — callers then have no
+    /// compression policy to profile.
+    /// The returned stream shares the reader's underlying file handle;
+    /// do not use it after disposing the PkgReader.
+    /// </summary>
+    public Stream? OpenRawPfscStream()
+    {
+        EnsureEkpfs();
+        if (_header.PfsImageOffset == 0 || _ekpfs == null)
+            return null;
+
+        var outer = PfsReader.Open(_reader, (long)_header.PfsImageOffset, _ekpfs);
+        var innerFile = FindPfsFile(outer, "pfs_image.dat")
+            ?? throw new InvalidOperationException("pfs_image.dat not found in outer PFS");
+        var s = outer.OpenFileStream(innerFile);
+        var probe = new byte[4];
+        s.Position = 0;
+        if (s.Read(probe, 0, 4) == 4 &&
+            probe[0] == (byte)'P' && probe[1] == (byte)'F' &&
+            probe[2] == (byte)'S' && probe[3] == (byte)'C')
+        {
+            s.Position = 0;
+            return s; // PFSC container
+        }
+        s.Dispose();
+        return null;
+    }
+
     private PfsReader? OpenInnerPfs()
     {
         if (_innerPfs != null)

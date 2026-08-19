@@ -135,8 +135,13 @@ public static class PkgBuilder
         var pfsBytes = pfsFiles
             .Select(s => (s.TargetPath, Data: s.Data ?? (s.TargetPath.EndsWith('/') ? [] : File.ReadAllBytes(s.SourcePath))))
             .ToList();
-        var inner = PfsWriter.BuildInnerPfs(pfsBytes, 0);
-        var pfsc = PFSCWriter.Build(inner, storeAllRaw: options.PfscMode != PfscMode.Compressed);
+        var inner = PfsWriter.BuildInnerPfs(pfsBytes, 0, out var innerAlloc);
+        var rawBlocks = BuildPolicyRawBlocks(innerAlloc, project, options, out int disabledCount);
+        var pfsc = PFSCWriter.Build(inner,
+            storeAllRaw: options.PfscMode != PfscMode.Compressed,
+            rawBlocks: options.PfscMode == PfscMode.Compressed ? rawBlocks : null);
+        if (disabledCount > 0 && !options.Quiet)
+            Console.Error.WriteLine($"[pfsc] {disabledCount} file(s) stored raw (pfs_compression=disable)");
         var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, out long outerDataStartMem);
 
         var pkg = Assemble(project, pfsBytes, outer, passcode, dk, inner.Length, sc0Files, outerDataStartMem);
@@ -147,6 +152,58 @@ public static class PkgBuilder
             WriteManifest(options.ManifestPath, project, pfsBytes.Select(f => (f.TargetPath, (long)f.Data.Length)).ToList(),
                 sc0Files, inner.Length, pfsc.Length, outer.Length,
                 pkg.Length, dk, passcode, outputPath, options);
+    }
+
+    /// <summary>
+    /// Resolves the per-file raw/compressed policy for a build from, in
+    /// order: the explicit profile on <paramref name="options"/> (repacked
+    /// packages), then the GP4 pfs_compression attribute (Sony's native
+    /// mechanism — gengp4_app output). Files matched as "disable" get every
+    /// allocated PFSC block stored raw; everything else compresses normally.
+    /// Returns null when no file is disabled (no policy work to do).
+    /// </summary>
+    private static PFSCWriter.RawBlockSet? BuildPolicyRawBlocks(PfsBuildResult allocation,
+        Gp4Project project, BuildOptions options, out int disabledCount)
+    {
+        disabledCount = 0;
+        if (options.PfscMode != PfscMode.Compressed)
+            return null; // Store mode: everything is stored raw anyway
+
+        // 1. Explicit replay profile (path → policy), captured from the
+        //    original package by PfscProfiler at repack time.
+        IReadOnlyDictionary<string, PfscPolicy>? profile = options.PfscProfile;
+        // 2. GP4 attribute (normalize: lowercase path → "enable"/"disable").
+        var policy = new Dictionary<string, PfscPolicy>();
+        foreach (var f in project.Files)
+        {
+            string key = PfscProfiler.NormalizeKey(f.TargPath);
+            if (f.PfsCompression.Equals("disable", StringComparison.OrdinalIgnoreCase))
+                policy[key] = PfscPolicy.Disable;
+            else if (f.PfsCompression.Equals("enable", StringComparison.OrdinalIgnoreCase))
+                policy[key] = PfscPolicy.Enable;
+        }
+
+        if (profile != null)
+        {
+            // Profile wins for the paths it covers (it captures the ORIGINAL's
+            // effective behavior, which is what a replay must reproduce).
+            foreach (var (key, p) in profile)
+                policy[key] = p;
+        }
+
+        if (policy.Count == 0)
+            return null;
+
+        // Map onto the allocation manifest.
+        var result = new PFSCWriter.RawBlockSet(allocation.BlockCount);
+        foreach (var alloc in allocation.Files)
+        {
+            if (!policy.TryGetValue(PfscProfiler.NormalizeKey(alloc.Path), out var p) || p != PfscPolicy.Disable)
+                continue;
+            result.AddRange(alloc.StartBlock, alloc.BlockCount);
+            disabledCount++;
+        }
+        return disabledCount > 0 ? result : null;
     }
 
     /// <summary>Streams the build through temp files for games whose inner PFS exceeds 2 GB.</summary>
@@ -173,18 +230,23 @@ public static class PkgBuilder
         try
         {
             // 1. Inner PFS → file
+            PfsBuildResult innerAlloc;
             using (var innerFs = new FileStream(innerPath, FileMode.Create, FileAccess.ReadWrite))
-                PfsWriter.BuildInnerPfsToStream(pfsFiles, 0, innerFs, ct,
+                innerAlloc = PfsWriter.BuildInnerPfsToStream(pfsFiles, 0, innerFs, ct,
                     (done, total) => options.Progress?.Invoke(BuildStage.InnerPfs, done, total));
             long innerSize = new FileInfo(innerPath).Length;
             options.Progress?.Invoke(BuildStage.InnerPfs, innerSize, innerSize);
 
-            // 2. PFSC → file
+            // 2. PFSC → file (per-file compression policy applies here too)
+            var rawBlocks = BuildPolicyRawBlocks(innerAlloc, project, options, out int disabledCount);
+            if (disabledCount > 0 && !options.Quiet)
+                Console.Error.WriteLine($"[pfsc] {disabledCount} file(s) stored raw (pfs_compression=disable)");
             using (var innerIn = new FileStream(innerPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             using (var pfscFs = new FileStream(pfscPath, FileMode.Create, FileAccess.ReadWrite))
                 PFSCWriter.BuildToStream(innerIn, pfscFs,
                     storeAllRaw: options.PfscMode != PfscMode.Compressed, ct,
-                    (done, total) => options.Progress?.Invoke(BuildStage.Pfsc, done, total));
+                    (done, total) => options.Progress?.Invoke(BuildStage.Pfsc, done, total),
+                    rawBlocks: options.PfscMode == PfscMode.Compressed ? rawBlocks : null);
 
             // 3. Outer PFS → file (signing + XTS)
             long outerDataStart = 0;

@@ -120,6 +120,10 @@ try
         case "pfscmp":
             RunPfsCompare(cmdArgs[1..]);
             break;
+        case "pfscprofile":
+        case "pfscprof":
+            RunPfscProfile(cmdArgs[1..]);
+            break;
         case "dumpinner":
         case "innerdump":
         case "extractinnerpfs":
@@ -837,9 +841,13 @@ static void RunRestructure(string[] args)
 ///
 /// Usage:
 ///   repack &lt;input.pkg&gt; [--out &lt;output.pkg&gt;] [--passcode X]
-///          [--validate] [--pfsc-mode store|compressed]
+///          [--validate] [--pfsc-mode compressed|store]
 ///          [--title "Name"] [--title-id CUSA00001]
 ///          [--work-dir &lt;dir&gt;]
+///
+/// The default --pfsc-mode compressed replays the ORIGINAL package's
+/// per-file raw/compressed policy (captured automatically). Use store only
+/// when you explicitly need an uncompressed PFSC.
 /// </summary>
 static void RunRepack(string[] args)
 {
@@ -847,7 +855,7 @@ static void RunRepack(string[] args)
     string? title = null, titleId = null, contentId = null;
     string? workDir = null;
     bool validate = false;
-    string pfscMode = "store";
+    string pfscMode = "compressed";
 
     for (int i = 0; i < args.Length; i++)
     {
@@ -870,7 +878,7 @@ static void RunRepack(string[] args)
     if (pkg == null || !File.Exists(pkg))
     {
         Console.Error.WriteLine("usage: repack <input.pkg> [--out <output.pkg>] [--passcode X]");
-        Console.Error.WriteLine("              [--validate] [--pfsc-mode store|compressed]");
+        Console.Error.WriteLine("              [--validate] [--pfsc-mode compressed|store]");
         Console.Error.WriteLine("              [--title \"Name\"] [--title-id CUSA00001]");
         Console.Error.WriteLine("              [--work-dir <dir>]");
         Console.Error.WriteLine();
@@ -904,6 +912,7 @@ static void RunRepack(string[] args)
     string dumpDir   = Path.Combine(workDir, "dump");
     string image0Dir = Path.Combine(dumpDir, "Image0");
     string gp4Path   = Path.Combine(workDir, "project.gp4");
+    string profilePath = Path.Combine(workDir, "pfsc_profile.json");
 
     if (outFile == null)
         outFile = Path.Combine(workDir, Path.GetFileNameWithoutExtension(pkg) + "_rebuilt.pkg");
@@ -916,10 +925,12 @@ static void RunRepack(string[] args)
 
     try
     {
-        // ── 1. Extract ──────────────────────────────────────────
+        // ── 1. Extract + capture the original's compression policy ──
         Console.WriteLine("[1/5] Extracting PKG...");
         bool isPatch = false;
         uint origContentType = 0, origContentFlags = 0;
+        List<OrbisPkgTool.Pfs.PfscFilePolicy>? profileFiles = null;
+        string? profileError = null;
         using (var reader = new PkgReader(pkg, passcode))
         {
             if (reader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
@@ -937,6 +948,34 @@ static void RunRepack(string[] args)
             // flag set (CUMULATIVE/FIRST/etc.) matters to orbis.
             origContentType = info.ContentType;
             origContentFlags = info.ContentFlags;
+
+            // Capture the original's effective per-file compression policy
+            // BEFORE extraction (needs the un-disposed reader's PFS layers).
+            // With --pfsc-mode compressed this is replayed into the GP4 so
+            // the rebuild matches the original's raw/compressed decisions.
+            if (pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    profileFiles = OrbisPkgTool.Pfs.PfscProfiler.Profile(pkg, passcode,
+                        out var stats, out profileError);
+                    if (profileFiles != null)
+                    {
+                        long disabled = profileFiles.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Disable);
+                        long enabled = profileFiles.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Enable);
+                        Console.WriteLine($"  PFSC profile: {profileFiles.Count} files ({enabled} compressed, {disabled} stored raw)");
+                        Console.WriteLine($"  PFSC blocks : {stats.RawBlocks} raw + {stats.CompressedBlocks} compressed of {stats.BlockCount}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  [note] {profileError ?? "no PFSC profile"} — building with uniform compression");
+                    }
+                }
+                catch (Exception pex)
+                {
+                    Console.WriteLine($"  [note] PFSC profiling failed ({pex.Message}) — building with uniform compression");
+                }
+            }
 
             Directory.CreateDirectory(dumpDir);
             int done = 0, total = 0;
@@ -968,7 +1007,15 @@ static void RunRepack(string[] args)
         Console.WriteLine("[2/5] Restructuring dump...");
         RunRestructure([dumpDir]);
 
-        // ── 4. Generate GP4 ─────────────────────────────────────
+        // ── 3b. Persist the captured profile (sidecar, OUTSIDE Image0 so
+        //        gp4gen never packages it into the rebuilt PFS) ──
+        if (profileFiles != null)
+        {
+            File.WriteAllText(profilePath, OrbisPkgTool.Pfs.PfscProfiler.ToJson(profileFiles));
+            Console.WriteLine($"[2b/5] Compression profile saved: {profilePath}");
+        }
+
+        // ── 4. Generate GP4 (with the replayed compression policy) ──
         Console.WriteLine("[3/5] Generating GP4 project...");
         var gp4Args = new List<string> { image0Dir, "--out", gp4Path };
         if (isPatch)            { gp4Args.Add("--patch"); }
@@ -976,6 +1023,7 @@ static void RunRepack(string[] args)
         if (titleId != null)    { gp4Args.Add("--title-id");   gp4Args.Add(titleId); }
         if (contentId != null)  { gp4Args.Add("--content-id"); gp4Args.Add(contentId); }
         if (passcode != PkgBuilder.DefaultPasscode) { gp4Args.Add("--passcode"); gp4Args.Add(passcode); }
+        if (profileFiles != null) { gp4Args.Add("--pfsc-profile"); gp4Args.Add(profilePath); }
         RunGp4Gen(gp4Args.ToArray());
 
         // ── 5. Build ────────────────────────────────────────────
@@ -1058,6 +1106,114 @@ static void RunShadPS4Diag(string[] args)
         return;
     }
     Environment.ExitCode = ShadPS4Diag.Run(pkg, dumpDir, passcode);
+}
+
+/// <summary>
+/// Profiles the PFSC compression of a PKG: block statistics (raw/compressed
+/// counts and bytes, matching pfsc_profile.py) and the per-file effective
+/// compression policy. Optionally saves the policy as a GP4-ready profile
+/// JSON and/or compares block-by-block against a reference PKG.
+/// Usage: pfscprofile &lt;pkg&gt; [--out profile.json] [--ref ref.pkg] [--passcode X]
+/// </summary>
+static void RunPfscProfile(string[] args)
+{
+    string? pkg = null, outFile = null, refPkg = null, passcode = OrbisPkgTool.Pkg.PkgBuilder.DefaultPasscode;
+    for (int i = 0; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--out" when i + 1 < args.Length: outFile = args[++i]; break;
+            case "--ref" when i + 1 < args.Length: refPkg = args[++i]; break;
+            case "--passcode" when i + 1 < args.Length: passcode = args[++i]; break;
+            default:
+                if (!args[i].StartsWith('-')) pkg = args[i];
+                break;
+        }
+    }
+    if (pkg == null || !File.Exists(pkg))
+    {
+        Console.Error.WriteLine("usage: pfscprofile <pkg> [--out profile.json] [--ref ref.pkg] [--passcode X]");
+        Console.Error.WriteLine("  Prints PFSC block statistics and the per-file effective compression policy.");
+        Console.Error.WriteLine("  --out  : write the policy as pfsc_profile.json (for gp4gen --pfsc-profile).");
+        Console.Error.WriteLine("  --ref  : diff the per-file policy against a reference (original) PKG.");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    try
+    {
+        var files = OrbisPkgTool.Pfs.PfscProfiler.Profile(pkg, passcode, out var stats, out string? err);
+        if (files == null)
+        {
+            Console.Error.WriteLine($"[error] {err ?? "profiling failed"}");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        long mb = 1024 * 1024;
+        Console.WriteLine($"PFSC profile      : {pkg}");
+        Console.WriteLine($"block size        : 0x{stats.BlockSize:X}");
+        Console.WriteLine($"blocks            : {stats.BlockCount}");
+        Console.WriteLine($"rounded size      : {stats.RoundedSize:N0} bytes ({stats.RoundedSize / mb:F1} MB)");
+        Console.WriteLine($"RAW blocks        : {stats.RawBlocks} ({stats.RawBlocks * 100.0 / Math.Max(1, stats.BlockCount):F1}%) -> {stats.RawBytes:N0} bytes");
+        Console.WriteLine($"COMPRESSED blocks : {stats.CompressedBlocks} ({stats.CompressedBlocks * 100.0 / Math.Max(1, stats.BlockCount):F1}%) -> {stats.CompressedBytes:N0} bytes");
+        Console.WriteLine();
+        long enabled = files.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Enable);
+        long disabled = files.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Disable);
+        long none = files.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.None);
+        Console.WriteLine($"files             : {files.Count} (compressed: {enabled}, stored raw: {disabled}, no policy: {none})");
+
+        if (outFile != null)
+        {
+            File.WriteAllText(outFile, OrbisPkgTool.Pfs.PfscProfiler.ToJson(files));
+            Console.WriteLine($"Wrote {outFile}");
+        }
+
+        if (refPkg != null)
+        {
+            var refFiles = OrbisPkgTool.Pfs.PfscProfiler.Profile(refPkg, passcode, out var refStats, out string? refErr);
+            if (refFiles == null)
+            {
+                Console.Error.WriteLine($"[error] reference: {refErr}");
+                Environment.ExitCode = 1;
+                return;
+            }
+            Console.WriteLine();
+            Console.WriteLine($"{' ',-20} {"THIS PKG",-18} {"REFERENCE",-18}");
+            Console.WriteLine($"{"blocks",-20} {stats.BlockCount,-18} {refStats.BlockCount,-18}");
+            Console.WriteLine($"{"raw blocks",-20} {stats.RawBlocks,-18} {refStats.RawBlocks,-18}");
+            Console.WriteLine($"{"compressed blocks",-20} {stats.CompressedBlocks,-18} {refStats.CompressedBlocks,-18}");
+            Console.WriteLine($"{"stored bytes",-20} {stats.DataBytes,-18} {refStats.DataBytes,-18}");
+            Console.WriteLine($"{"files raw-policy",-20} {disabled,-18} {refFiles.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Disable),-18}");
+
+            var byPath = refFiles.ToDictionary(f => OrbisPkgTool.Pfs.PfscProfiler.NormalizeKey(f.Path), f => f.Policy);
+            int both = 0, onlyHere = 0, onlyRef = 0, mismatch = 0;
+            foreach (var f in files)
+            {
+                string key = OrbisPkgTool.Pfs.PfscProfiler.NormalizeKey(f.Path);
+                if (!byPath.TryGetValue(key, out var refPolicy)) { onlyHere++; continue; }
+                if (f.Policy != refPolicy) mismatch++;
+                else both++;
+                byPath.Remove(key);
+            }
+            onlyRef = byPath.Count;
+            Console.WriteLine();
+            Console.WriteLine($"policy agreement : {both} identical, {mismatch} mismatched, {onlyHere} only here, {onlyRef} only in reference");
+            if (mismatch > 0)
+            {
+                Console.WriteLine("mismatched files (first 20):");
+                var refMap = refFiles.ToDictionary(f => OrbisPkgTool.Pfs.PfscProfiler.NormalizeKey(f.Path), f => f.Policy);
+                foreach (var f in files.Where(f => refMap.TryGetValue(
+                             OrbisPkgTool.Pfs.PfscProfiler.NormalizeKey(f.Path), out var rp) && rp != f.Policy).Take(20))
+                    Console.WriteLine($"  {f.Policy,-8} vs {refMap[OrbisPkgTool.Pfs.PfscProfiler.NormalizeKey(f.Path)],-8}  {f.Path}");
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[error] {ex.Message}");
+        Environment.ExitCode = 1;
+    }
 }
 
 static void RunPfsCompare(string[] args)
@@ -1212,6 +1368,7 @@ static void RunDumpInner(string[] args)
 static void RunGp4Gen(string[] args)
 {
     string? folder = null, outFile = null, title = null, titleId = null, contentId = null, passcode = "";
+    string? pfscProfilePath = null;
     bool isPatch = false;
     for (int i = 0; i < args.Length; i++)
     {
@@ -1223,6 +1380,7 @@ static void RunGp4Gen(string[] args)
             case "--title-id" when i + 1 < args.Length: titleId = args[++i]; break;
             case "--content-id" when i + 1 < args.Length: contentId = args[++i]; break;
             case "--passcode" when i + 1 < args.Length: passcode = args[++i]; break;
+            case "--pfsc-profile" when i + 1 < args.Length: pfscProfilePath = args[++i]; break;
             default:
                 if (!args[i].StartsWith('-')) folder = args[i];
                 break;
@@ -1231,17 +1389,25 @@ static void RunGp4Gen(string[] args)
     if (folder == null || !Directory.Exists(folder))
     {
         Console.Error.WriteLine("usage: gp4gen <folder> [--patch] [--title X] [--title-id X] [--content-id X] [--passcode X] [--out file.gp4]");
+        Console.Error.WriteLine("              [--pfsc-profile <pfsc_profile.json>]   (replay original compression policy)");
         Environment.ExitCode = 2;
         return;
     }
     try
     {
-        var proj = OrbisPkgTool.Gp4.Gp4Project.FromFolder(folder, isPatch, title, titleId, contentId, passcode);
+        Dictionary<string, OrbisPkgTool.Pfs.PfscPolicy>? profile = null;
+        if (pfscProfilePath != null)
+        {
+            profile = OrbisPkgTool.Pfs.PfscProfiler.ParseJson(File.ReadAllText(pfscProfilePath));
+            Console.WriteLine($"Loaded PFSC profile: {profile.Count} files ({profile.Values.Count(p => p == OrbisPkgTool.Pfs.PfscPolicy.Disable)} disabled)");
+        }
+        var proj = OrbisPkgTool.Gp4.Gp4Project.FromFolder(folder, isPatch, title, titleId, contentId, passcode, profile);
         string xml = proj.Serialize();
         if (outFile != null)
         {
             File.WriteAllText(outFile, xml);
-            Console.WriteLine($"Wrote {outFile} ({proj.Files.Count} files, {(isPatch ? "patch" : "app")})");
+            int disabled = proj.Files.Count(f => f.PfsCompression.Equals("disable", StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine($"Wrote {outFile} ({proj.Files.Count} files, {(isPatch ? "patch" : "app")}, {disabled} pfs_compression=disable)");
         }
         else
         {
@@ -1336,7 +1502,7 @@ static void RunPkgBuild(string[] args)
         args = args[1..];
     string? gp4 = null, folder = null, outFile = null, passcode = OrbisPkgTool.Pkg.PkgBuilder.DefaultPasscode;
     bool validate = false;
-    string pfscMode = "store";
+    string pfscMode = "compressed";
     string? manifest = null;
     uint? contentTypeOverride = null, contentFlagsOverride = null;
     for (int i = 0; i < args.Length; i++)
@@ -1364,7 +1530,7 @@ static void RunPkgBuild(string[] args)
     if (gp4 == null || !File.Exists(gp4))
     {
         Console.Error.WriteLine("usage: pkg build <project.gp4> <source_folder> [--passcode X] [--out file.pkg]");
-        Console.Error.WriteLine("       [--pfsc-mode store|compressed] [--manifest file.json] [--validate]");
+        Console.Error.WriteLine("       [--pfsc-mode compressed|store] [--manifest file.json] [--validate]");
         Environment.ExitCode = 2;
         return;
     }
@@ -2775,6 +2941,7 @@ OrbisPkgTool.Cli : PS4 PKG command-line tool
     build       : Build a fake PKG from GP4        (build -h for details)
     orbis-build : Build a fake PKG using orbis-pub-cmd
     repack      : Extract + restructure + gp4gen + build (one-shot)
+                  (auto-replays the original's per-file compression policy)
     gp4gen      : Generate GP4 from a folder       (gp4gen -h for details)
     restructure : Restructure dump for build (--check dry-run)
     sweep       : Batch verify PKGs in a folder
@@ -2784,6 +2951,7 @@ OrbisPkgTool.Cli : PS4 PKG command-line tool
     trp         : Trophy TRP tools                 (trp -h for details)
 
   Diagnostic:
+    pfscprofile    : PFSC compression stats + per-file policy (replay source)
     shadps4diag    : Mirror shadPS4 PKG reading logic step-by-step
     s4trace        : Exact shadPS4Plus allocation/bounds replica
     s4extract      : Exact shadPS4Plus Extract + ExtractFiles replica

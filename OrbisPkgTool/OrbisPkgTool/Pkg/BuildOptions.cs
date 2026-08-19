@@ -3,10 +3,15 @@ namespace OrbisPkgTool.Pkg;
 /// <summary>PFSC block storage mode.</summary>
 public enum PfscMode
 {
-    /// <summary>Every block stored raw at its 0x10000 slot (stable default — proven on console-format fixtures).</summary>
+    /// <summary>Every block stored raw at its 0x10000 slot (explicit opt-in;
+    /// produces a very large PKG for compressed games).</summary>
     Store,
 
-    /// <summary>Compressed blocks (48 89 + raw deflate + BE Adler32) with raw fallback — proven against orbis-pub-cmd.</summary>
+    /// <summary>Compressed blocks (48 89 + raw deflate + BE Adler32) with raw
+    /// fallback for incompressible data and per-file policy replay — proven
+    /// against orbis-pub-cmd and shadPS4. This is the default: running
+    /// `build`/`repack` without --pfsc-mode must never silently emit a fully
+    /// uncompressed multi-GB package.</summary>
     Compressed,
 }
 
@@ -27,8 +32,21 @@ public sealed class BuildOptions
 {
     public string Passcode { get; set; } = PkgBuilder.DefaultPasscode;
 
-    /// <summary>PFSC storage mode. Default: Store (stable until console testing).</summary>
-    public PfscMode PfscMode { get; set; } = PfscMode.Store;
+    /// <summary>
+    /// PFSC storage mode. Default: Compressed (matches orbis-pub-cmd behavior;
+    /// the old Store default silently emitted fully-uncompressed PKGs).
+    /// Per-file policy (GP4 pfs_compression / PfscProfile) applies only in
+    /// Compressed mode.
+    /// </summary>
+    public PfscMode PfscMode { get; set; } = PfscMode.Compressed;
+
+    /// <summary>
+    /// Optional per-file compression policy captured from the ORIGINAL
+    /// package (path → enable/disable), produced by PfscProfiler.Profile and
+    /// fed to the builder at repack time. Overrides the GP4 attribute for
+    /// the paths it covers; used only in Compressed mode.
+    /// </summary>
+    public IReadOnlyDictionary<string, OrbisPkgTool.Pfs.PfscPolicy>? PfscProfile { get; set; }
 
     /// <summary>
     /// Optional content_type (0x74) override — repack carries the original
@@ -45,6 +63,9 @@ public sealed class BuildOptions
 
     /// <summary>When set, writes a build manifest (JSON) to this path.</summary>
     public string? ManifestPath { get; set; }
+
+    /// <summary>Suppress the stderr policy/diagnostic notes.</summary>
+    public bool Quiet { get; set; }
 
     /// <summary>Progress callback: (stage, bytes done, bytes total). long-based.</summary>
     public Action<BuildStage, long, long>? Progress { get; set; }

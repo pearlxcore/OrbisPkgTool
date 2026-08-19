@@ -20,6 +20,32 @@ public sealed record PfsSourceFile(string TargetPath, string SourcePath, long Le
     public byte[]? Data { get; init; }
 }
 
+/// <summary>
+/// Per-file block allocation produced by the inner-PFS writer: the file's
+/// data starts at <see cref="StartBlock"/> and occupies exactly
+/// <see cref="BlockCount"/> consecutive 0x10000 blocks. This is the ONLY
+/// authoritative mapping from files to PFSC blocks — the layout also contains
+/// header/inode/dirent/FPT blocks before any file data, so block ranges can
+/// never be derived from cumulative file lengths.
+/// </summary>
+public sealed record PfsAllocation(string Path, long StartBlock, long BlockCount);
+
+/// <summary>
+/// Complete inner-PFS build result: the image was written to the output
+/// stream and files were allocated at these block ranges.
+/// </summary>
+public sealed class PfsBuildResult
+{
+    public List<PfsAllocation> Files { get; } = [];
+    /// <summary>First data block that belongs to a FILE (structural blocks
+    /// 0..DataStartBlock-1 are header/inodes/dirents/FPT).</summary>
+    public long DataStartBlock { get; init; }
+    /// <summary>Total block count of the image.</summary>
+    public long BlockCount { get; init; }
+    /// <summary>Byte length of the image (BlockCount * 0x10000).</summary>
+    public long Length => BlockCount * PfsFormat.BlockSize;
+}
+
 public static class PfsWriter
 {
     // Central, origin-classified format constants — see PfsFormat.cs.
@@ -45,14 +71,14 @@ public static class PfsWriter
     /// Layout: block 0 header, 1 inodes, 2 superroot dirents, 3 fpt, 4 empty,
     /// then dir dirent blocks, then contiguous file data.
     /// </summary>
-    public static void BuildInnerPfsToStream(List<(string Path, byte[] Data)> files, long fileTime, Stream output,
+    public static PfsBuildResult BuildInnerPfsToStream(List<(string Path, byte[] Data)> files, long fileTime, Stream output,
         System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
     {
         var inputs = files
             .OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
             .Select(f => new PfsFileInput { Path = f.Path, Length = f.Data.Length, Data = f.Data })
             .ToList();
-        BuildInnerPfsCore(inputs, fileTime, output, ct, progress);
+        return BuildInnerPfsCore(inputs, fileTime, output, ct, progress);
     }
 
     /// <summary>
@@ -60,17 +86,17 @@ public static class PfsWriter
     /// supports &gt;2GB games without loading file contents into memory).
     /// Byte-identical output to the memory-backed overload for the same files.
     /// </summary>
-    public static void BuildInnerPfsToStream(IReadOnlyList<PfsSourceFile> files, long fileTime, Stream output,
+    public static PfsBuildResult BuildInnerPfsToStream(IReadOnlyList<PfsSourceFile> files, long fileTime, Stream output,
         System.Threading.CancellationToken ct = default, Action<long, long>? progress = null)
     {
         var inputs = files
             .OrderBy(f => f.TargetPath, StringComparer.OrdinalIgnoreCase)
             .Select(f => new PfsFileInput { Path = f.TargetPath, Length = f.Length, Data = f.Data, SourcePath = f.SourcePath })
             .ToList();
-        BuildInnerPfsCore(inputs, fileTime, output, ct, progress);
+        return BuildInnerPfsCore(inputs, fileTime, output, ct, progress);
     }
 
-    private static void BuildInnerPfsCore(List<PfsFileInput> files, long fileTime, Stream output,
+    private static PfsBuildResult BuildInnerPfsCore(List<PfsFileInput> files, long fileTime, Stream output,
         System.Threading.CancellationToken ct, Action<long, long>? progress)
     {
         // Directory tree
@@ -180,6 +206,7 @@ public static class PfsWriter
             // makes the next file share this StartBlock (block overlap).
             long blocks = CeilDiv(f.Input.Length, (int)BlockSize);
             if (blocks < 1) blocks = 1;
+            f.BlocksAllocated = blocks;
             nextBlock += blocks;
         }
         long ndblock = nextBlock;
@@ -382,9 +409,28 @@ public static class PfsWriter
             dataDone += f.Input.Length;
             progress?.Invoke(dataDone, dataTotal);
         }
+
+        // Allocation manifest — the authoritative file→block mapping used by
+        // the PFSC stage to apply per-file compression policy.
+        var manifest = new PfsBuildResult
+        {
+            DataStartBlock = fileNodes.Count > 0 ? fileNodes.Min(f => f.StartBlock) : ndblock,
+            BlockCount = ndblock,
+        };
+        foreach (var f in fileNodes)
+            manifest.Files.Add(new PfsAllocation(f.Input.Path, f.StartBlock, f.BlocksAllocated));
+        return manifest;
     }
 
     public static byte[] BuildInnerPfs(List<(string Path, byte[] Data)> files, long fileTime)
+    {
+        return BuildInnerPfs(files, fileTime, out _);
+    }
+
+    /// <summary>Byte[] build that also reports the per-file block allocation
+    /// (needed by the PFSC stage for per-file compression policy).</summary>
+    public static byte[] BuildInnerPfs(List<(string Path, byte[] Data)> files, long fileTime,
+        out PfsBuildResult allocation)
     {
         // Estimate; fall back to a temp file for images that don't fit in a byte[].
         long estSize = 6 * BlockSize + files.Sum(f =>
@@ -395,7 +441,7 @@ public static class PfsWriter
         if (estSize <= int.MaxValue - 1024)
         {
             using var ms = new MemoryStream((int)estSize);
-            BuildInnerPfsToStream(files, fileTime, ms);
+            allocation = BuildInnerPfsToStream(files, fileTime, ms);
             return ms.ToArray();
         }
         throw new InvalidOperationException(
@@ -1068,6 +1114,7 @@ public static class PfsWriter
         public DirNode? Parent;
         public uint Number;
         public long StartBlock;
+        public long BlocksAllocated;
         public PfsFileInput Input = new() { Path = "", Length = 0 };
     }
 

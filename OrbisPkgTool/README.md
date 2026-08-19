@@ -16,10 +16,18 @@ OrbisPkgTool/            class library (net10.0) — the replacement
   PkgFileEntry.cs        listing entry model
   Pkg/PkgHeader.cs       PKG header (big-endian)
   Pkg/PkgEntry.cs        entry table + well-known entry IDs/names
+  Pkg/PkgBuilder.cs      PKG builder (in-memory + streaming) with per-file
+                         compression policy replay (pfs_compression)
+  Pkg/BuildOptions.cs    build options (PfscMode.Compressed is the default)
   Crypto/PkgCrypto.cs    passcode → derived keys, AES-128-CBC entry decryption, RSA, EKPFS
   Crypto/PkgKeySet.cs    embedded RSA keys (leaked dk3 private key + fake keyset)
+  Gp4/Gp4Project.cs      GP4 parse/serialize/generate (pfs_compression-aware)
   Pfs/PfsReader.cs       PFS filesystem: inodes, dirents, XTS, indirection, contiguous runs
+  Pfs/PfsWriter.cs       inner/outer PFS writer + per-file block allocation manifest
   Pfs/PFSCStream.cs      PFSC (zlib-compressed inner image) decompression
+  Pfs/PFSCWriter.cs      PFSC writer: per-file raw/compressed policy, both paths
+  Pfs/PfscDeflate.cs     zlib 4 KiB-window deflate (zlib1.dll, SharpZipLib fallback)
+  Pfs/PfscProfiler.cs    original-package compression-policy inspector → GP4 profile
 OrbisPkgTool.Cli/        console harness — drop-in orbis-pub-cmd command syntax
 ```
 
@@ -82,3 +90,23 @@ See `REVERSE_ENGINEERING_NOTES.md` for the binary analysis (OpenSSL 1.0.2g
 statically linked, command/option strings, entry formats) and the validated
 format details — including the critical PS4 PFS AES-XTS **little-endian-first
 GF(2^128) tweak advance** that differs from the OpenSSL/mbedtls convention.
+
+## Compression policy replay (repack parity)
+
+`repack` now replays the ORIGINAL package's per-file compression decisions:
+during extraction it profiles the original's PFSC block table + inner-PFS
+inode allocation (`PfscProfiler`), stamps the resulting enable/disable policy
+into the generated GP4 (`pfs_compression` attributes — the Sony-native
+mechanism, so the GP4 stays cross-buildable by LibOrbisPkg/orbis-pub-cmd),
+and the builder stores every block of a "disable" file RAW while compressing
+everything else. See `docs/PFSC_COMPRESSION_POLICY.md` for the design,
+verification results and the original's zero-fill ownership analysis.
+
+```
+OrbisPkgTool.Cli repack game.pkg                 # policy replay is automatic
+OrbisPkgTool.Cli pfscprofile game.pkg --ref original.pkg   # policy diff
+```
+
+PFSC compressed blocks use a 4 KiB deflate window (zlib1.dll
+`deflateInit2`, windowBits=-12) — formally valid for the declared
+`0x48 0x89` zlib header — with a SharpZipLib fallback when zlib is absent.

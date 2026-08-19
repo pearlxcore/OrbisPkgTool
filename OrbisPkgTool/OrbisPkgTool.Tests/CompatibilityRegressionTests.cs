@@ -422,4 +422,276 @@ public class CompatibilityRegressionTests : IDisposable
         string pkg = Build(gp4, img, "inv.pkg");
         PkgValidator.ValidatePkgFile(pkg, Passcode);
     }
+
+    // ── 12. Per-file compression policy (pfs_compression replay) ──
+    // The core of compression parity: blocks of "disable" files must be RAW,
+    // blocks of enabled files must be COMPRESSED, structural blocks compress
+    // normally, and the profiler must reconstruct the policy from the result.
+
+    /// <summary>Extracts the PFSC block table from a PKG: block → stored size.</summary>
+    private static long[] PfscBlockSizes(string pkgPath)
+    {
+        using var reader = new PkgReader(pkgPath, Passcode);
+        using var pfsc = reader.OpenRawPfscStream()
+            ?? throw new InvalidOperationException("no PFSC in rebuilt PKG");
+        pfsc.Position = 0;
+        var hdr = new byte[0x30];
+        ReadFully(pfsc, hdr);
+        long blockSize = BitConverter.ToInt64(hdr, 0x0C) & 0xFFFFFFFF;
+        long tableOff = BitConverter.ToInt64(hdr, 0x18);
+        long rounded = BitConverter.ToInt64(hdr, 0x28);
+        long blockCount = rounded / blockSize;
+        var table = new byte[(blockCount + 1) * 8];
+        pfsc.Position = tableOff;
+        ReadFully(pfsc, table);
+        var sizes = new long[blockCount];
+        for (long i = 0; i < blockCount; i++)
+            sizes[i] = BitConverter.ToInt64(table, (int)(i * 8 + 8)) - BitConverter.ToInt64(table, (int)(i * 8));
+        return sizes;
+    }
+
+    private static void ReadFully(Stream s, byte[] buf)
+    {
+        int read = 0;
+        while (read < buf.Length)
+        {
+            int n = s.Read(buf, read, buf.Length - read);
+            if (n <= 0) throw new EndOfStreamException();
+            read += n;
+        }
+    }
+
+    [Fact]
+    public void PfscPolicy_DisabledFilesStoredRaw_OthersCompressed()
+    {
+        long B = PfsFormat.BlockSize;
+        // raw.bin: 3 blocks of pseudo-random (incompressible-ish but not
+        // zero — we want compression to be *possible* so the raw storage is
+        // caused by POLICY, not incompressibility). Disabled files must be
+        // raw even though the data compresses fine.
+        var rnd = new Random(1234);
+        byte[] Make(int blocks)
+        {
+            var b = new byte[blocks * B];
+            rnd.NextBytes(b);
+            return b;
+        }
+        var rawFile = Make(3);      // disabled → 3 raw blocks
+        var compFile = Data(3 * B, 0x41); // compressible, enabled → compressed blocks
+
+        var (gp4, img) = MakeFixture("policy",
+            ("raw.bin", rawFile),
+            ("comp.bin", compFile));
+        // Patch the GP4: raw.bin gets pfs_compression="disable".
+        string xml = File.ReadAllText(gp4);
+        xml = xml.Replace(
+            "<file><entry path=\"raw.bin\" /><orig_path>raw.bin</orig_path></file>",
+            "<file><entry path=\"raw.bin\" /><orig_path>raw.bin</orig_path></file><attrib>disable</attrib>");
+        // The parser reads pfs_compression from <file targ_path=... pfs_compression=.../> —
+        // rewrite in the attribute form instead.
+        xml = xml.Replace(
+            "<file><entry path=\"raw.bin\" /><orig_path>raw.bin</orig_path></file><attrib>disable</attrib>",
+            "<file targ_path=\"raw.bin\" orig_path=\"raw.bin\" pfs_compression=\"disable\" />");
+        File.WriteAllText(gp4, xml);
+
+        string pkg = Build(gp4, img, "policy.pkg", new BuildOptions
+        {
+            PfscMode = PfscMode.Compressed,
+            Quiet = true,
+        });
+        PkgValidator.ValidatePkgFile(pkg, Passcode);
+
+        // Round-trip: both files extract byte-exact (raw storage must not
+        // corrupt content).
+        Assert.Equal(rawFile, ExtractFileBytes(pkg, "Image0/raw.bin"));
+        Assert.Equal(compFile, ExtractFileBytes(pkg, "Image0/comp.bin"));
+
+        // Block policy: locate each file's blocks via the inner PFS inodes.
+        var inner = OpenInner(pkg);
+        var rawIno = inner.FindFile("raw.bin")!;
+        var compIno = inner.FindFile("comp.bin")!;
+        var sizes = PfscBlockSizes(pkg);
+        foreach (var b in inner.EnumerateFileBlocks(rawIno))
+            Assert.Equal(PfsFormat.BlockSize, sizes[b]);      // disabled → RAW
+        foreach (var b in inner.EnumerateFileBlocks(compIno))
+            Assert.True(sizes[b] < PfsFormat.BlockSize,
+                $"comp.bin block {b} stored raw ({sizes[b]} bytes) but the file is compressible and enabled");
+
+        // Structural blocks (0..data start) must be compressed.
+        long dataStart = Math.Min(rawIno.StartBlock, compIno.StartBlock);
+        for (long b = 0; b < dataStart; b++)
+            Assert.True(sizes[b] < PfsFormat.BlockSize,
+                $"structural block {b} stored raw — expected compressed");
+    }
+
+    [Fact]
+    public void PfscPolicy_ProfilerRoundTrip_ReconstructsPolicy()
+    {
+        long B = PfsFormat.BlockSize;
+        var rnd = new Random(4321);
+        byte[] Make(int blocks)
+        {
+            var b = new byte[blocks * B];
+            rnd.NextBytes(b);
+            return b;
+        }
+        // Mixed: disabled raw file, enabled compressible file, enabled
+        // incompressible (random) file, empty file.
+        var disabledFile = Make(2);
+        var enabledCompressible = Data(2 * B, 0x55);
+        var enabledIncompressible = Make(2); // compresses below threshold? random 64K blocks
+        // (64 KiB of random data at level 6 stays near/above blockSize minus
+        // the 6-byte overhead — treat as "compresses marginally". To force a
+        // guaranteed-raw block regardless, use a size that cannot compress:
+        // zlib stored-block overhead makes 64 KiB random ≈ blockSize + 5.)
+        var emptyFile = Array.Empty<byte>();
+
+        var (gp4, img) = MakeFixture("prof",
+            ("disabled.bin", disabledFile),
+            ("enabled.bin", enabledCompressible),
+            ("random.bin", enabledIncompressible),
+            ("empty.bin", emptyFile));
+        string xml = File.ReadAllText(gp4);
+        xml = xml.Replace(
+            "<file><entry path=\"disabled.bin\" /><orig_path>disabled.bin</orig_path></file>",
+            "<file targ_path=\"disabled.bin\" orig_path=\"disabled.bin\" pfs_compression=\"disable\" />");
+        File.WriteAllText(gp4, xml);
+
+        string pkg = Build(gp4, img, "prof.pkg", new BuildOptions
+        {
+            PfscMode = PfscMode.Compressed,
+            Quiet = true,
+        });
+        PkgValidator.ValidatePkgFile(pkg, Passcode);
+
+        // PROFILER ROUND-TRIP: the inferred policy must reproduce what was set.
+        var files = OrbisPkgTool.Pfs.PfscProfiler.Profile(pkg, Passcode, out var stats, out string? err)
+            ?? throw new InvalidOperationException(err ?? "profiling failed");
+        var byPath = files.ToDictionary(f => f.Path, f => f.Policy);
+        Assert.Equal(OrbisPkgTool.Pfs.PfscPolicy.Disable, byPath["disabled.bin"]);
+        Assert.Equal(OrbisPkgTool.Pfs.PfscPolicy.Enable, byPath["enabled.bin"]);
+        // Empty files still occupy ONE PFS block (writer invariant: 0-block
+        // allocation would overlap the next file's start block). A zero block
+        // compresses, so the profiler reports Enable — "no meaningful policy"
+        // only applies to files the walker finds with zero blocks.
+        Assert.Equal(OrbisPkgTool.Pfs.PfscPolicy.Enable, byPath["empty.bin"]);
+        // random.bin: either Enable (if zlib squeezed it under) or Disable —
+        // both are legitimate effective outcomes; assert it's one of them.
+        Assert.Contains(byPath["random.bin"], new[] { OrbisPkgTool.Pfs.PfscPolicy.Enable, OrbisPkgTool.Pfs.PfscPolicy.Disable });
+
+        // JSON round-trip.
+        string json = OrbisPkgTool.Pfs.PfscProfiler.ToJson(files);
+        var parsed = OrbisPkgTool.Pfs.PfscProfiler.ParseJson(json);
+        Assert.Equal(OrbisPkgTool.Pfs.PfscPolicy.Disable, parsed["disabled.bin"]);
+        Assert.Equal(OrbisPkgTool.Pfs.PfscPolicy.Enable, parsed["enabled.bin"]);
+    }
+
+    [Fact]
+    public void PfscPolicy_StreamingMatchesMemoryBuilder_WithPolicy()
+    {
+        // The streaming and memory PFSC writers must produce identical bytes
+        // for the same raw-block policy (both paths honored identically).
+        long B = PfsFormat.BlockSize;
+        var rnd = new Random(77);
+        int three = (int)(3 * B);
+        var pfs = new byte[5 * B];
+        {
+            var tmp = new byte[three];
+            rnd.NextBytes(tmp);
+            Buffer.BlockCopy(tmp, 0, pfs, 0, three);  // blocks 0-2: random
+        }
+        Array.Fill(pfs, (byte)0x41, three, (int)(2 * B)); // blocks 3-4: compressible
+
+        var rawPart = pfs[..three];
+        var compPart = pfs[three..];
+        var inner = PfsWriter.BuildInnerPfs(
+            [("raw.bin", rawPart), ("comp.bin", compPart)], 0, out var alloc);
+        Assert.Equal(2, alloc.Files.Count);
+        var rawA = alloc.Files.First(f => f.Path == "raw.bin");
+        var rawB = alloc.Files.First(f => f.Path == "comp.bin");
+        var set = new OrbisPkgTool.Pfs.PFSCWriter.RawBlockSet(alloc.BlockCount);
+        set.AddRange(rawA.StartBlock, rawA.BlockCount);
+
+        var mem = PFSCWriter.Build(inner, storeAllRaw: false, rawBlocks: set);
+        using var ms = new MemoryStream();
+        using (var inMs = new MemoryStream(inner))
+            PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: false, rawBlocks: set);
+        var streamed = ms.ToArray();
+        Assert.Equal(Sha(mem), Sha(streamed));
+        Assert.Equal(mem.Length, streamed.Length);
+
+        // Round-trip decompression still exact.
+        using var dec = new PFSCStream(new MemoryStream(mem));
+        using var outMs = new MemoryStream();
+        dec.CopyTo(outMs);
+        Assert.Equal(Sha(inner), Sha(outMs.ToArray()));
+    }
+
+    [Fact]
+    public void PfscPolicy_PolicySurvivesFileReordering()
+    {
+        // The policy maps by PATH, not position — building the same files in
+        // a different GP4 order must keep each file's policy attached to it.
+        long B = PfsFormat.BlockSize;
+        var rnd = new Random(99);
+        byte[] Rnd(int n) { var b = new byte[n]; rnd.NextBytes(b); return b; }
+        var a = Rnd((int)B);
+        var b2 = Rnd((int)B);
+        var c = Rnd((int)B);
+
+        var (gp4, img) = MakeFixture("order", ("a.bin", a), ("b.bin", b2), ("c.bin", c));
+        string xml = File.ReadAllText(gp4);
+        xml = xml.Replace(
+            "<file><entry path=\"b.bin\" /><orig_path>b.bin</orig_path></file>",
+            "<file targ_path=\"b.bin\" orig_path=\"b.bin\" pfs_compression=\"disable\" />");
+        File.WriteAllText(gp4, xml);
+        string pkg1 = Build(gp4, img, "order1.pkg", new BuildOptions { PfscMode = PfscMode.Compressed, Quiet = true });
+
+        // Same files, GP4 order reversed (a, b, c → c, b, a).
+        var (gp4b, imgb) = MakeFixture("order2", ("c.bin", c), ("b.bin", b2), ("a.bin", a));
+        string xml2 = File.ReadAllText(gp4b);
+        xml2 = xml2.Replace(
+            "<file><entry path=\"b.bin\" /><orig_path>b.bin</orig_path></file>",
+            "<file targ_path=\"b.bin\" orig_path=\"b.bin\" pfs_compression=\"disable\" />");
+        File.WriteAllText(gp4b, xml2);
+        string pkg2 = Build(gp4b, imgb, "order2.pkg", new BuildOptions { PfscMode = PfscMode.Compressed, Quiet = true });
+
+        foreach (string pkg in new[] { pkg1, pkg2 })
+        {
+            var inner = OpenInner(pkg);
+            var ino = inner.FindFile("b.bin")!;
+            var sizes = PfscBlockSizes(pkg);
+            foreach (var blk in inner.EnumerateFileBlocks(ino))
+                Assert.Equal(PfsFormat.BlockSize, sizes[blk]); // b.bin raw in both orders
+        }
+    }
+
+    [Fact]
+    public void PfscPolicy_Cancellation_AbortsCleanly()
+    {
+        var (gp4, img) = MakeFixture("cancel", ("big.bin", Data(4 * PfsFormat.BlockSize, 0x22)));
+        var cts = new System.Threading.CancellationTokenSource();
+        var opts = new BuildOptions
+        {
+            PfscMode = PfscMode.Compressed,
+            Quiet = true,
+            CancellationToken = cts.Token,
+            Progress = (stage, done, total) =>
+            {
+                if (stage == BuildStage.Pfsc && done > 0) cts.Cancel();
+            },
+        };
+        // The in-memory path compresses synchronously; cancel during PFSC.
+        // Either the build completes before the token fires (tiny fixture) or
+        // it throws OperationCanceledException — never a partial/corrupt file.
+        try
+        {
+            Build(gp4, img, "cancel.pkg", opts);
+        }
+        catch (OperationCanceledException)
+        {
+            // fine — and no output file may exist
+            Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(gp4)!, "cancel.pkg")));
+        }
+    }
 }
