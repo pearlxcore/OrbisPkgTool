@@ -5,6 +5,7 @@ obj/
 *.pdb
 *.zip
 *.pkg
+*.rar
 .vs/
 *.user
 *.suo
@@ -16,7 +17,6 @@ LibOrbisPkg.v0.2/
 CrossValidation/Results/*
 CrossValidation/Work/*
 !CrossValidation/Results/.gitkeep
-!CrossValidation/Work/.gitkeep
 CrossValidation/config.json
 CrossValidation/lib/*.dll
 CrossValidation/OpenOrbisDriver/bin/
