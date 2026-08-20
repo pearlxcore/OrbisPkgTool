@@ -427,6 +427,8 @@ public static class CommandRegistry
                     Hint = "e.g. EP0001-CUSA00001_00-MYGAME000000001" },
                 new CommandField { Id = "workdir", Label = "Work directory", Kind = FieldKind.Folder,
                     Hint = "Keep intermediate files here (optional)" },
+                new CommandField { Id = "keepwork", Label = "Keep work dir", Kind = FieldKind.Check,
+                    Hint = "Don't auto-delete intermediates on success" },
             ],
             BuildArgs = f =>
             {
@@ -440,6 +442,7 @@ public static class CommandRegistry
                 if (f["titleid"] is { Length: > 0 } tid) { a.Add("--title-id"); a.Add(tid); }
                 if (f["contentid"] is { Length: > 0 } cid) { a.Add("--content-id"); a.Add(cid); }
                 if (f["workdir"] is { Length: > 0 } wd) { a.Add("--work-dir"); a.Add(wd); }
+                if (f["keepwork"] == "1") a.Add("--keep-work");
                 a.Add(f["pkg"]);
                 return a.ToArray();
             },
@@ -479,6 +482,8 @@ public static class CommandRegistry
                     Hint = "e.g. EP0001-CUSA00001_00-MYGAME000000001 — blank keeps base" },
                 new CommandField { Id = "workdir", Label = "Work directory", Kind = FieldKind.Folder,
                     Hint = "Keep intermediate files here (optional)" },
+                new CommandField { Id = "keepwork", Label = "Keep work dir", Kind = FieldKind.Check,
+                    Hint = "Don't auto-delete intermediates on success" },
             ],
             BuildArgs = f =>
             {
@@ -494,6 +499,7 @@ public static class CommandRegistry
                 if (f["titleid"] is { Length: > 0 } tid) { a.Add("--title-id"); a.Add(tid); }
                 if (f["contentid"] is { Length: > 0 } cid) { a.Add("--content-id"); a.Add(cid); }
                 if (f["workdir"] is { Length: > 0 } wd) { a.Add("--work-dir"); a.Add(wd); }
+                if (f["keepwork"] == "1") a.Add("--keep-work");
                 a.Add(f["basepkg"]);
                 a.Add(f["updpkg"]);
                 return a.ToArray();

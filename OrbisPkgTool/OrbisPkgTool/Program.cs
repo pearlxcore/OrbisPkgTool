@@ -897,7 +897,7 @@ static void RunRepack(string[] args)
     string? pkg = null, outFile = null, passcode = PkgBuilder.DefaultPasscode;
     string? title = null, titleId = null, contentId = null;
     string? workDir = null;
-    bool validate = false;
+    bool validate = false, keepWork = false;
     string pfscMode = "compressed";
     int workers = 1;
 
@@ -915,6 +915,7 @@ static void RunRepack(string[] args)
             case "--workers" when i + 1 < args.Length && int.TryParse(args[i + 1], out int w) && w >= 0:
                 workers = w; ++i; break;
             case "--validate": validate = true; break;
+            case "--keep-work": keepWork = true; break;
             default:
                 if (!args[i].StartsWith('-')) pkg = args[i];
                 break;
@@ -926,7 +927,7 @@ static void RunRepack(string[] args)
         Console.Error.WriteLine("usage: repack <input.pkg> [--out <output.pkg>] [--passcode X]");
         Console.Error.WriteLine("              [--validate] [--pfsc-mode compressed|store]");
         Console.Error.WriteLine("              [--workers N] [--title \"Name\"] [--title-id CUSA00001]");
-        Console.Error.WriteLine("              [--work-dir <dir>]");
+        Console.Error.WriteLine("              [--work-dir <dir>] [--keep-work]");
         Console.Error.WriteLine();
         Console.Error.WriteLine("  Full extract→restructure→gp4gen→build in one command.");
         Console.Error.WriteLine("  Paths with &, [, ], spaces, Unicode all pass through natively.");
@@ -1126,8 +1127,8 @@ static void RunRepack(string[] args)
         Console.WriteLine("===================================================================");
         Console.WriteLine($"  REPACK COMPLETE in {overallSw.Elapsed.TotalSeconds:F1}s");
         Console.WriteLine($"  Output: {outFile}");
-        Console.WriteLine($"  Work:   {workDir}");
         Console.WriteLine("===================================================================");
+        CleanupWorkDirOnSuccess(workDir, outFile, keepWork);
     }
     catch (Exception ex)
     {
@@ -1160,7 +1161,7 @@ static void RunMerge(string[] args)
     string? passcode = null, basePasscode = null, updatePasscode = null;
     string? title = null, titleId = null, contentId = null;
     string? workDir = null;
-    bool validate = false;
+    bool validate = false, keepWork = false;
     string pfscMode = "compressed";
     int workers = 1;
 
@@ -1180,6 +1181,7 @@ static void RunMerge(string[] args)
             case "--workers" when i + 1 < args.Length && int.TryParse(args[i + 1], out int w) && w >= 0:
                 workers = w; ++i; break;
             case "--validate": validate = true; break;
+            case "--keep-work": keepWork = true; break;
             default:
                 if (!args[i].StartsWith('-'))
                 {
@@ -1196,7 +1198,7 @@ static void RunMerge(string[] args)
         Console.Error.WriteLine("              [--passcode X] [--base-passcode X] [--update-passcode X]");
         Console.Error.WriteLine("              [--validate] [--pfsc-mode compressed|store]");
         Console.Error.WriteLine("              [--workers N] [--title \"Name\"] [--title-id CUSA00001]");
-        Console.Error.WriteLine("              [--content-id X] [--work-dir <dir>]");
+        Console.Error.WriteLine("              [--content-id X] [--work-dir <dir>] [--keep-work]");
         Console.Error.WriteLine();
         Console.Error.WriteLine("  Extract base + update, overlay update files onto base, repack as one PKG.");
         Console.Error.WriteLine("  Output is always sealed with the default all-zeros passcode.");
@@ -1479,8 +1481,8 @@ static void RunMerge(string[] args)
         Console.WriteLine("===================================================================");
         Console.WriteLine($"  MERGE COMPLETE in {overallSw.Elapsed.TotalSeconds:F1}s");
         Console.WriteLine($"  Output: {outFile}");
-        Console.WriteLine($"  Work:   {workDir}");
         Console.WriteLine("===================================================================");
+        CleanupWorkDirOnSuccess(workDir, outFile, keepWork);
     }
     catch (Exception ex)
     {
@@ -2077,6 +2079,42 @@ static int SafeWindowWidth()
 {
     try { return Math.Min(Console.WindowWidth - 1, 120); }
     catch { return 120; }
+}
+
+/// <summary>
+/// Deletes the repack/merge work dir after a SUCCESSFUL run — unless the
+/// output PKG lives inside it (nothing to salvage then) or --keep-work was
+/// given. Failures keep the work dir for debugging (caller handles those).
+/// </summary>
+static void CleanupWorkDirOnSuccess(string workDir, string outFile, bool keepWork)
+{
+    if (keepWork)
+    {
+        Console.WriteLine($"  Work dir kept (--keep-work): {workDir}");
+        return;
+    }
+    // The default output name lives INSIDE the work dir — deleting it would
+    // destroy the result. Keep and warn instead.
+    string outFull = Path.GetFullPath(outFile);
+    string workFull = Path.GetFullPath(workDir) + Path.DirectorySeparatorChar;
+    if (outFull.StartsWith(workFull, Path.DirectorySeparatorChar == '/' ?
+            StringComparison.OrdinalIgnoreCase : StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine($"  Work dir kept (output PKG lives inside it): {workDir}");
+        Console.WriteLine("  (move the PKG out, then delete the folder to reclaim space)");
+        return;
+    }
+    try
+    {
+        Directory.Delete(workDir, recursive: true);
+        Console.WriteLine("  Work dir cleaned up (use --keep-work to keep intermediates)");
+    }
+    catch (Exception ex)
+    {
+        // Locked file, AV scan, etc. — never fail the run over cleanup.
+        Console.WriteLine($"  [note] could not fully clean work dir ({ex.Message})");
+        Console.WriteLine($"  Work dir kept: {workDir}");
+    }
 }
 
 /// <summary>Parses "0x1A" / "26" style CLI values into a uint32.</summary>
@@ -3663,6 +3701,9 @@ repack : Extract a PKG and rebuild it, in one command
     --title-id <id>        override the title ID
     --content-id <id>      override the content ID
     --work-dir <dir>       keep intermediate files in this folder
+    --keep-work           don't delete the work dir on success (default:
+                          cleaned up when output is elsewhere; kept when
+                          the output PKG lives inside the work dir)
 
   Example:
     repack original.pkg --out rebuilt.pkg --validate
@@ -3698,6 +3739,9 @@ merge : Integrate an update PKG into its base PKG, producing one PKG
     --title-id <id>        override the title ID
     --content-id <id>      override the content ID
     --work-dir <dir>       keep intermediate files in this folder
+    --keep-work           don't delete the work dir on success (default:
+                          cleaned up when output is elsewhere; kept when
+                          the output PKG lives inside the work dir)
 
   The output PKG is always sealed with the default all-zeros passcode,
   regardless of the inputs' passcodes.
