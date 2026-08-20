@@ -145,7 +145,19 @@ public static class PkgBuilder
         var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, out long outerDataStartMem);
 
         var pkg = Assemble(project, pfsBytes, outer, passcode, dk, inner.Length, sc0Files, outerDataStartMem);
-        File.WriteAllBytes(outputPath, pkg);
+        // Write to a temp file first, then atomically rename — a crash or
+        // exception mid-write leaves the final path untouched rather than a
+        // corrupt partial file.
+        string tmpPath = outputPath + ".tmp";
+        try
+        {
+            File.WriteAllBytes(tmpPath, pkg);
+            File.Move(tmpPath, outputPath, overwrite: true);
+        }
+        finally
+        {
+            try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+        }
         if (options.Validate)
             PkgValidator.ValidatePkgFile(outputPath, passcode);
         if (options.ManifestPath != null)
@@ -213,14 +225,41 @@ public static class PkgBuilder
     {
         var ct = options.CancellationToken;
 
-        // Pre-flight disk-space estimate (temp pipeline is ~3.2× inner + output).
+        // Pre-flight disk-space estimate. Temp files (inner.pfs + inner.pfsc +
+        // outer.pfs) live under %TEMP%, while the final PKG lands on the output
+        // drive — when these are different drives, each must be checked against
+        // its own requirement (the old code only checked the OUTPUT drive, so a
+        // C: %TEMP% with a D: output silently passed with no temp space).
         long estInner = pfsFiles.Sum(f => (f.Length + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize * PfsFormat.BlockSize);
-        long required = (long)(estInner * PfsFormat.TempDiskMultiplier) + estInner / 4;
-        var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(outputPath)) ?? ".");
-        if (drive.AvailableFreeSpace < required)
-            throw new InvalidOperationException(
-                $"Estimated temporary disk requirement: {required / 1e9:F1} GB. " +
-                $"Available on {drive.Name}: {drive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
+        long requiredTemp = (long)(estInner * PfsFormat.TempDiskMultiplier) + estInner / 4;
+        long requiredOutput = estInner / 4 + estInner; // final PKG ≈ PFSC + header overhead
+        string tempRoot = Path.GetPathRoot(Path.GetFullPath(Path.GetTempPath())) ?? ".";
+        string outRoot = Path.GetPathRoot(Path.GetFullPath(outputPath)) ?? ".";
+        if (string.Equals(tempRoot, outRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            var drive = new DriveInfo(tempRoot);
+            // Same volume: the temp files are deleted before the PKG reaches
+            // full size, so the peak is max(temp, output), not the sum.
+            long peak = Math.Max(requiredTemp, requiredOutput);
+            if (drive.AvailableFreeSpace < peak)
+                throw new InvalidOperationException(
+                    $"Estimated disk requirement: {peak / 1e9:F1} GB (temp pipeline or output, whichever peaks). " +
+                    $"Available on {drive.Name}: {drive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
+        }
+        else
+        {
+            var tempDrive = new DriveInfo(tempRoot);
+            if (tempDrive.AvailableFreeSpace < requiredTemp)
+                throw new InvalidOperationException(
+                    $"Estimated temporary disk requirement: {requiredTemp / 1e9:F1} GB. " +
+                    $"Available on {tempDrive.Name} (%TEMP%): {tempDrive.AvailableFreeSpace / 1e9:F1} GB. " +
+                    "Aborting before build (set TMP to a drive with more space).");
+            var outDrive = new DriveInfo(outRoot);
+            if (outDrive.AvailableFreeSpace < requiredOutput)
+                throw new InvalidOperationException(
+                    $"Estimated output disk requirement: {requiredOutput / 1e9:F1} GB. " +
+                    $"Available on {outDrive.Name}: {outDrive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
+        }
 
         string tmpDir = Path.Combine(Path.GetTempPath(), $"pkgbuild_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tmpDir);
@@ -256,10 +295,21 @@ public static class PkgBuilder
                     out outerDataStart, ct,
                     (done, total) => options.Progress?.Invoke(BuildStage.OuterPfs, done, total));
 
-            // 4. Assemble PKG → output file
-            AssembleToFile(project, pfsFiles, outerPath, passcode, dk, innerSize, sc0Files, outputPath, ct,
-                (done, total) => options.Progress?.Invoke(BuildStage.Assemble, done, total),
-                outerDataStart: outerDataStart, options: options);
+            // 4. Assemble PKG → temp file, then atomically rename.
+            //    A crash or exception leaves the final path untouched rather
+            //    than a corrupt partial PKG.
+            string tmpOutput = outputPath + ".tmp";
+            try
+            {
+                AssembleToFile(project, pfsFiles, outerPath, passcode, dk, innerSize, sc0Files, tmpOutput, ct,
+                    (done, total) => options.Progress?.Invoke(BuildStage.Assemble, done, total),
+                    outerDataStart: outerDataStart, options: options);
+                File.Move(tmpOutput, outputPath, overwrite: true);
+            }
+            finally
+            {
+                try { if (File.Exists(tmpOutput)) File.Delete(tmpOutput); } catch { }
+            }
 
             if (options.Validate)
                 PkgValidator.ValidatePkgFile(outputPath, passcode);

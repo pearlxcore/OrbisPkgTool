@@ -403,36 +403,65 @@ public sealed class PkgReader : IDisposable
 
     /// <summary>Extracts all files (Sc0 + Image0) to the output directory.</summary>
     public void ExtractAll(string outputDirectory, IProgress<(int Current, int Total, string CurrentFile)>? progress = null)
+        => ExtractAll(outputDirectory, progress, new ExtractAllOptions());
+
+    /// <summary>Extracts all files (Sc0 + Image0) to the output directory.</summary>
+    public List<ExtractionFailure> ExtractAll(string outputDirectory,
+        IProgress<(int Current, int Total, string CurrentFile)>? progress,
+        ExtractAllOptions options)
     {
+        var failures = new List<ExtractionFailure>();
         var all = ListFiles();
         // Empty directories (e.g. patch PKGs' Media/Plugins, mono/etc/) exist
         // only as tree nodes — materialize them so the dump preserves the
         // full tree and the rebuild carries them through.
         foreach (var d in all.Where(f => f.IsDirectory))
-            Directory.CreateDirectory(Path.Combine(outputDirectory,
-                d.Path.Replace('/', Path.DirectorySeparatorChar)));
+        {
+            try
+            {
+                Directory.CreateDirectory(SanitizeExtractPath(outputDirectory, d.Path));
+            }
+            catch (Exception ex) when (options.ContinueOnError)
+            {
+                failures.Add(new ExtractionFailure(d.Path, ex));
+            }
+        }
         var files = all.Where(f => !f.IsDirectory).ToList();
         int i = 0;
         foreach (var f in files)
         {
+            options.CancellationToken.ThrowIfCancellationRequested();
             progress?.Report((i++, files.Count, f.Path));
-            string dest = Path.Combine(outputDirectory, f.Path.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            if (f.Path.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase))
+            try
             {
-                ExtractImage0FileTo(f.Path, dest);
+                string dest = SanitizeExtractPath(outputDirectory, f.Path);
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                if (f.Path.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase))
+                {
+                    ExtractImage0FileTo(f.Path, dest);
+                }
+                else
+                {
+                    // Prefer the exact entry by ID (unnamed entries are listed
+                    // with synthetic "entry_XXXX.bin" names that FindSc0Entry
+                    // cannot resolve by name).
+                    var entry = _entries.FirstOrDefault(e => e.Id == (uint)f.EntryId)
+                        ?? FindSc0Entry(Unprefix(f.Path));
+                    if (entry == null)
+                        throw new InvalidDataException(
+                            $"Cannot resolve PKG entry for '{f.Path}' (entry id={f.EntryId}). " +
+                            "The package may be corrupt or use an unnamed entry without a synthetic name.");
+                    var data = ReadEntryData(entry);
+                    File.WriteAllBytes(dest, data);
+                }
             }
-            else
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (options.ContinueOnError)
             {
-                // Prefer the exact entry by ID (unnamed entries are listed
-                // with synthetic "entry_XXXX.bin" names that FindSc0Entry
-                // cannot resolve by name).
-                var entry = _entries.FirstOrDefault(e => e.Id == (uint)f.EntryId)
-                    ?? FindSc0Entry(Unprefix(f.Path))!;
-                var data = ReadEntryData(entry);
-                File.WriteAllBytes(dest, data);
+                failures.Add(new ExtractionFailure(f.Path, ex));
             }
         }
+        return failures;
     }
 
     private void ExtractImage0FileTo(string entryPath, string destPath)
@@ -564,7 +593,7 @@ public sealed class PkgReader : IDisposable
         var e = FindSc0Entry(name);
         if (e == null)
             throw new FileNotFoundException($"Entry not found: Sc0/{name}");
-        string dest = Path.Combine(outputDirectory, name.Replace('/', Path.DirectorySeparatorChar));
+        string dest = SanitizeExtractPath(outputDirectory, "Sc0/" + name);
         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
         File.WriteAllBytes(dest, ReadEntryData(e));
     }
@@ -775,7 +804,7 @@ public sealed class PkgReader : IDisposable
             foreach (var f in files)
             {
                 string rel = Unprefix(f.Path);
-                string dest = Path.Combine(outputDirectory, rel.Replace('/', Path.DirectorySeparatorChar));
+                string dest = SanitizeExtractPath(outputDirectory, f.Path);
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 var fileIno = inner.FindFile(rel)!;
                 if (fileIno.Size > int.MaxValue) {
@@ -790,7 +819,7 @@ public sealed class PkgReader : IDisposable
         }
         else
         {
-            string dest = Path.Combine(outputDirectory, Path.GetFileName(path));
+            string dest = SanitizeExtractPath(outputDirectory, "Image0/" + Path.GetFileName(path));
             if (node.Size > int.MaxValue) {
                 using var src = inner.OpenFileStream(node);
                 using var dst = File.Create(dest);
@@ -837,6 +866,27 @@ public sealed class PkgReader : IDisposable
 
     private static string NormalizeEntryPath(string path) =>
         path.Trim().TrimEnd('/').Replace('\\', '/');
+
+    /// <summary>
+    /// Maps an entry path (e.g. "Image0/app0/data.bin") to an absolute path
+    /// inside <paramref name="outputDirectory"/>, rejecting anything that
+    /// would escape it. PFS dirent names come straight from the package —
+    /// a malicious or corrupt PKG could carry "../.." components, absolute
+    /// paths (which Path.Combine keeps!), or drive-relative paths, any of
+    /// which could write outside the extraction directory.
+    /// </summary>
+    private static string SanitizeExtractPath(string outputDirectory, string entryPath)
+    {
+        string relative = entryPath.Replace('/', Path.DirectorySeparatorChar);
+        string full = Path.GetFullPath(Path.Combine(outputDirectory, relative));
+        string root = Path.GetFullPath(outputDirectory);
+        if (!root.EndsWith(Path.DirectorySeparatorChar))
+            root += Path.DirectorySeparatorChar;
+        if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Path traversal detected: entry '{entryPath}' resolves outside the output directory.");
+        return full;
+    }
 
     private static string Unprefix(string path) =>
         path.StartsWith("Sc0/", StringComparison.OrdinalIgnoreCase) ? path["Sc0/".Length..]

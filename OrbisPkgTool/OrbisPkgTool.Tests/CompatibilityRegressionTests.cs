@@ -694,4 +694,88 @@ public class CompatibilityRegressionTests : IDisposable
             Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(gp4)!, "cancel.pkg")));
         }
     }
+
+    // ── 20. Path-traversal protection: SanitizeExtractPath rejects "../" ──
+
+    [Fact]
+    public void ExtractAll_RejectsPathTraversal()
+    {
+        var (gp4, img) = MakeFixture("traversal", ("a.bin", Data(3)));
+        string pkg = Build(gp4, img, "traversal.pkg");
+        string outDir = NewDir("traversal_out");
+
+        // A legitimate extraction must succeed.
+        using (var reader = new PkgReader(pkg, Passcode))
+            reader.ExtractAll(outDir, null, new ExtractAllOptions());
+        Assert.True(File.Exists(Path.Combine(outDir, "Image0", "a.bin")));
+
+        // The sanitizer is private — invoke it directly to pin the invariant
+        // that traversal, absolute, and drive-relative names are rejected.
+        var mi = typeof(PkgReader).GetMethod("SanitizeExtractPath",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(mi);
+        string root = Path.GetFullPath(outDir);
+
+        // "../" escape attempts must throw (anything resolving outside the
+        // output root). Note "Image0/../x" alone stays inside the root and
+        // is legitimately allowed — only true escapes throw.
+        Assert.ThrowsAny<Exception>(() =>
+            mi!.Invoke(null, [root, "../evil.txt"]));
+        Assert.ThrowsAny<Exception>(() =>
+            mi!.Invoke(null, [root, "../../windows/system32/evil.dll"]));
+        Assert.ThrowsAny<Exception>(() =>
+            mi!.Invoke(null, [root, "Image0/../../../evil.txt"]));
+        Assert.ThrowsAny<Exception>(() =>
+            mi!.Invoke(null, [root, "Image0/..\\..\\evil.txt"]));
+        // Windows absolute paths (Path.Combine keeps them) must throw.
+        Assert.ThrowsAny<Exception>(() =>
+            mi!.Invoke(null, [root, @"C:\Windows\evil.dll"]));
+        // Drive-relative paths must throw (they resolve against the process
+        // CWD, never the output dir).
+        Assert.ThrowsAny<Exception>(() =>
+            mi!.Invoke(null, [root, @"C:evil.dll"]));
+
+        // Legitimate nested paths must pass and stay inside the root.
+        string ok = (string)mi!.Invoke(null, [root, "Image0/app0/data.bin"])!;
+        Assert.StartsWith(root, ok, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(Path.Combine(root, "Image0", "app0", "data.bin"), ok);
+        // A benign "Image0/../x" resolves inside the root — allowed.
+        string ok2 = (string)mi!.Invoke(null, [root, "Image0/../data.bin"])!;
+        Assert.Equal(Path.Combine(root, "data.bin"), ok2);
+    }
+
+    // ── 21. Per-file error tolerance: ContinueOnError collects failures ──
+
+    [Fact]
+    public void ExtractAll_ContinueOnError_CollectsFailures()
+    {
+        var (gp4, img) = MakeFixture("tolerant", ("a.bin", Data(3)));
+        string pkg = Build(gp4, img, "tolerant.pkg");
+        string outDir = NewDir("tolerant_out");
+
+        // Normal extraction: zero failures.
+        using (var reader = new PkgReader(pkg, Passcode))
+        {
+            var failures = reader.ExtractAll(outDir, null, new ExtractAllOptions());
+            Assert.Empty(failures);
+        }
+
+        // ContinueOnError default is true; CancellationToken defaults to None.
+        var opts = new ExtractAllOptions { ContinueOnError = true };
+        Assert.True(opts.ContinueOnError);
+        Assert.Equal(System.Threading.CancellationToken.None, opts.CancellationToken);
+    }
+
+    // ── 22. Atomic output: no stale .tmp after successful build ──
+
+    [Fact]
+    public void Build_AtomicallyWrites_NoStaleTmp()
+    {
+        var (gp4, img) = MakeFixture("atomic", ("a.bin", Data(3)));
+        string outDir = Path.GetDirectoryName(gp4)!;
+        string pkg = Path.Combine(outDir, "atomic.pkg");
+        _ = Build(gp4, img, "atomic.pkg");
+        Assert.True(File.Exists(pkg));
+        Assert.False(File.Exists(pkg + ".tmp"));
+    }
 }

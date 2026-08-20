@@ -385,7 +385,8 @@ static void RunExtract((string Pkg, string? Entry, string? OutDir, string Passco
     if (o.Entry == null)
     {
         int filesDone = 0, filesTotal = 0;
-        reader.ExtractAll(o.OutDir, new Progress<(int Current, int Total, string File)>(p =>
+        var failures = reader.ExtractAll(o.OutDir,
+            new Progress<(int Current, int Total, string File)>(p =>
         {
             filesDone = p.Current; filesTotal = p.Total;
             if (verbose)
@@ -399,7 +400,7 @@ static void RunExtract((string Pkg, string? Entry, string? OutDir, string Passco
                 if (line.Length < w) line += new string(' ', w - line.Length);
                 Console.Write($"\r{line}");
             }
-        }));
+        }), new ExtractAllOptions());
         if (verbose)
         {
             string done = $"  [100%] {filesTotal}/{filesTotal}  done.";
@@ -407,7 +408,15 @@ static void RunExtract((string Pkg, string? Entry, string? OutDir, string Passco
             if (done.Length < w) done += new string(' ', w - done.Length);
             Console.WriteLine($"\r{done}");
         }
-        Console.WriteLine($"Extracted {filesTotal} files in {sw.Elapsed.TotalSeconds:F1}s.");
+        int ok = filesTotal - failures.Count;
+        Console.WriteLine($"Extracted {ok}/{filesTotal} files in {sw.Elapsed.TotalSeconds:F1}s.");
+        if (failures.Count > 0)
+        {
+            Console.Error.WriteLine($"[warn] {failures.Count} file(s) failed:");
+            foreach (var f in failures)
+                Console.Error.WriteLine($"  {f.Path}: {f.Exception.Message}");
+            Environment.ExitCode = 1;
+        }
     }
     else
     {
@@ -979,7 +988,8 @@ static void RunRepack(string[] args)
 
             Directory.CreateDirectory(dumpDir);
             int done = 0, total = 0;
-            reader.ExtractAll(dumpDir, new Progress<(int Current, int Total, string File)>(p =>
+            var extractFailures = reader.ExtractAll(dumpDir,
+                new Progress<(int Current, int Total, string File)>(p =>
             {
                 done = p.Current; total = p.Total;
                 int pct = total > 0 ? (int)(100.0 * done / total) : 0;
@@ -987,8 +997,17 @@ static void RunRepack(string[] args)
                 int w = SafeWindowWidth();
                 if (line.Length < w) line += new string(' ', w - line.Length);
                 Console.Write($"\r{line}");
-            }));
-            if (total > 0) Console.WriteLine($"\r  [100%] {total} files extracted.");
+            }), new ExtractAllOptions());
+            if (total > 0) Console.WriteLine($"\r  [100%] {total - extractFailures.Count}/{total} files extracted.");
+            if (extractFailures.Count > 0)
+            {
+                Console.Error.WriteLine($"[error] {extractFailures.Count} file(s) failed to extract — aborting repack to avoid producing an incomplete PKG.");
+                foreach (var f in extractFailures)
+                    Console.Error.WriteLine($"  {f.Path}: {f.Exception.Message}");
+                Console.Error.WriteLine($"Work dir kept for inspection: {workDir}");
+                Environment.ExitCode = 1;
+                return;
+            }
         }
 
         // ── 2. Check for inner PFS ──────────────────────────────
