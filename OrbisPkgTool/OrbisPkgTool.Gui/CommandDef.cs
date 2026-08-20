@@ -31,6 +31,10 @@ public sealed class CommandField
     public string[] Choices { get; init; } = [];
     /// <summary>Default text value.</summary>
     public string Default { get; init; } = "";
+    /// <summary>Placeholder text (text boxes) or checkbox label / combo tooltip.</summary>
+    public string Hint { get; init; } = "";
+    /// <summary>Per-choice descriptions for Combo: item shown as "value — remark".</summary>
+    public string[]? ChoiceRemarks { get; init; }
     /// <summary>Positional argument index (fields with Index >= 0 are appended in order).</summary>
     public int Position { get; init; } = -1;
 }

@@ -352,9 +352,18 @@ public static class PFSCWriter
         }
 
         // Data.
+        // Write each block and immediately release its reference so the GC
+        // can reclaim the byte[] mid-loop instead of holding all blockCount
+        // arrays alive until the method returns. For a 1 GB inner PFS
+        // (blockCount ~17k) this keeps peak memory at ~one block instead
+        // of the full compressed image.
         ms.Position = dataOffset;
-        foreach (var b in compressedBlocks)
+        for (int i = 0; i < blockCount; i++)
+        {
+            var b = compressedBlocks[i];
             ms.Write(b, 0, b.Length);
+            compressedBlocks[i] = null!; // release before the next iteration
+        }
         return ms.ToArray();
     }
 

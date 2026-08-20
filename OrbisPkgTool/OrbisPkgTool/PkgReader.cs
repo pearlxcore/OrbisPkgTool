@@ -477,8 +477,12 @@ public sealed class PkgReader : IDisposable
         var node = cachedInode ?? inner.FindFile(entryPath["Image0/".Length..]);
         if (node == null)
             throw new FileNotFoundException($"Entry not found: {entryPath}");
-        // Stream large files directly to disk, small files via memory
-        if (node.Size > 512 * 1024 * 1024) // 512 MB threshold
+        // Stream large files directly to disk, small files via memory.
+        // 64 MB threshold: files above this are streamed via OpenFileStream
+        // to avoid holding multi-hundred-MB byte[]s in GC during extract
+        // (the old 512 MB threshold let 200+ MB files pile up in Gen 2
+        // before the build stage even started).
+        if (node.Size > 64 * 1024 * 1024) // 64 MB threshold
         {
             using var src = inner.OpenFileStream(node);
             using var dst = File.Create(destPath);
@@ -814,7 +818,7 @@ public sealed class PkgReader : IDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 // f.Inode was carried by WalkPfsTree — no FindFile re-resolution.
                 var fileIno = f.Inode ?? inner.FindFile(Unprefix(f.Path))!;
-                if (fileIno.Size > int.MaxValue) {
+                if (fileIno.Size > 64 * 1024 * 1024) {
                     // Large file — stream to disk
                     using var src = inner.OpenFileStream(fileIno);
                     using var dst = File.Create(dest);

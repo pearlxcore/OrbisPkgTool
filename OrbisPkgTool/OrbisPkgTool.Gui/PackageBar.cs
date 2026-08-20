@@ -144,10 +144,13 @@ public sealed class PackageBar : UserControl
 
     public void SetRecents(IEnumerable<string> paths)
     {
+        // Snapshot FIRST — callers may pass _recents itself (AddRecent does),
+        // and Clear() below would empty the input before it is copied.
+        var items = paths.ToList();
         _recents.Clear();
-        _recents.AddRange(paths);
+        _recents.AddRange(items);
         _recentsCombo.Items.Clear();
-        foreach (var p in _recents)
+        foreach (var p in items)
             _recentsCombo.Items.Add(Path.GetFileName(p) + "  —  " + p);
     }
 
@@ -158,7 +161,8 @@ public sealed class PackageBar : UserControl
         _recents.Insert(0, path);
         if (_recents.Count > 12) _recents.RemoveRange(12, _recents.Count - 12);
         SetRecents(_recents);
-        _recentsCombo.SelectedIndex = 0;
+        if (_recentsCombo.Items.Count > 0)
+            _recentsCombo.SelectedIndex = 0;
     }
 
     public IReadOnlyList<string> GetRecents() => _recents;

@@ -2,10 +2,9 @@ using OrbisPkgTool;
 using OrbisPkgTool.Crypto;
 using OrbisPkgTool.Pkg;
 
-// Drop-in C# replacement for:
-//   orbis-pub-cmd.exe img_file_list --passcode X --oformat long+original_size <pkg>
-//   orbis-pub-cmd.exe img_extract   --passcode X <pkg>[:<entry>] <out_dir>
-// plus `selftest` (validates embedded key constants).
+// OrbisPkgTool — build, inspect, extract and check PS4 .pkg files.
+// Run with no arguments (or --help) to see the command list, or
+// pass '<command> --help' for detailed help on a single command.
 
 var cmdArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
 if (cmdArgs.Length == 0 || (cmdArgs.Length == 1 && cmdArgs[0] is "-h" or "--help"))
@@ -112,6 +111,9 @@ try
             break;
         case "repack":
             RunRepack(cmdArgs[1..]);
+            break;
+        case "merge":
+            RunMerge(cmdArgs[1..]);
             break;
         case "shadps4diag":
             RunShadPS4Diag(cmdArgs[1..]);
@@ -665,7 +667,7 @@ static void RunSfo(string[] args)
 /// </summary>
 static void RunRestructure(string[] args)
 {
-    bool check = false, verbose = false;
+    bool check = false, verbose = false, forOrbis = false;
     string? folder = null;
     for (int i = 0; i < args.Length; i++)
     {
@@ -673,6 +675,7 @@ static void RunRestructure(string[] args)
         {
             case "--check": check = true; break;
             case "--verbose": case "-v": verbose = true; break;
+            case "--for-orbis": forOrbis = true; break;
             default:
                 if (!args[i].StartsWith('-')) folder = args[i];
                 break;
@@ -681,7 +684,8 @@ static void RunRestructure(string[] args)
 
     if (folder == null)
     {
-        Console.Error.WriteLine("usage: restructure <dump_folder> [--check] [--verbose]");
+        Console.Error.WriteLine("usage: restructure <dump_folder> [--check] [--verbose] [--for-orbis]");
+        Console.Error.WriteLine("  --for-orbis  delete Sony-regen files (for Sony's img_create path; default keeps them)");
         Environment.ExitCode = 2;
         return;
     }
@@ -738,10 +742,18 @@ static void RunRestructure(string[] args)
         Console.WriteLine("Sc0:    not present (already restructured, or update/DLC PKG)");
     }
 
-    // Check for files Sony will regenerate (warn if present)
+    // Junk that is ALWAYS deleted.
+    var junkFiles = new[] { "param.sfo.original" };
+    // Sony-regen Sc0 entries. By default these are KEPT and carried into the
+    // rebuild — our pure-C# builder prefers the original bytes over its
+    // placeholders (PkgBuilder replaces the placeholder entry data with the
+    // real file), so the rebuilt PKG's license/playgo entries are
+    // byte-identical to the original (img_verify parity). Sony's img_create
+    // regenerates them and rejects user copies, so --for-orbis restores the
+    // delete behavior for the Sony build path.
     var sonyRegen = new[] { "license.dat", "license.info", "psreserved.dat",
-        "playgo-chunk.dat", "playgo-chunk.sha", "playgo-manifest.xml", "param.sfo.original" };
-    var regenFound = sonyRegen.Where(f =>
+        "playgo-chunk.dat", "playgo-chunk.sha", "playgo-manifest.xml" };
+    var regenFound = sonyRegen.Concat(junkFiles).Where(f =>
             File.Exists(Path.Combine(sceSys, f)) ||
             File.Exists(Path.Combine(sc0, f)))
         .ToList();
@@ -753,11 +765,15 @@ static void RunRestructure(string[] args)
 
     if (regenFound.Count > 0)
     {
-        Console.WriteLine($"Sony-regenerated files found ({regenFound.Count}):");
+        Console.WriteLine($"Sony-regen files found ({regenFound.Count}):");
         foreach (var f in regenFound)
-            Console.WriteLine($"  [WILL DELETE] {f}");
-        if (!check)
-            Console.WriteLine("  These will be removed — Sony's img_create regenerates them.");
+            Console.WriteLine($"  [KEEP] {f}");
+        if (check)
+            Console.WriteLine("  (kept — our builder carries originals into the rebuild for byte-parity)");
+        else
+            Console.WriteLine("  Keeping — our builder carries originals into the rebuild for byte-parity.");
+        if (forOrbis)
+            Console.WriteLine("  (--for-orbis: these WILL be deleted for Sony's img_create path)");
     }
 
     // Summary
@@ -813,22 +829,40 @@ static void RunRestructure(string[] args)
         Console.WriteLine("  Deleted Sc0/");
     }
 
-    // 2. Delete Sony-regenerated files (even if Sc0 was already merged)
-    Console.WriteLine("--- Cleaning Sony-regenerated files ---");
-    foreach (string f in sonyRegen)
+    // 2. Sony-regen entries: kept by default (byte-parity rebuilds); deleted
+    //    only with --for-orbis because Sony's img_create regenerates them and
+    //    rejects user-provided copies.
+    if (forOrbis)
     {
-        var path = Path.Combine(sceSys, f);
-        var appPath = Path.Combine(sceSys, "app", f);
-        foreach (string p in new[] { path, appPath })
+        Console.WriteLine("--- Deleting Sony-regen files (--for-orbis) ---");
+        foreach (string f in sonyRegen)
         {
-            // app/playgo-chunk.dat (entry 0x1008) is PATCH-ONLY content that
-            // the original carries — only the root playgo files are
-            // Sony-regenerated. Keep the app/ variant.
-            if (File.Exists(p) && !(p == appPath && f == "playgo-chunk.dat"))
+            var path = Path.Combine(sceSys, f);
+            var appPath = Path.Combine(sceSys, "app", f);
+            foreach (string p in new[] { path, appPath })
             {
-                File.Delete(p);
-                Console.WriteLine($"  Delete: {Path.GetRelativePath(root, p)}");
+                // app/playgo-chunk.dat (entry 0x1008) is PATCH-ONLY content that
+                // the original carries — only the root playgo files are
+                // Sony-regenerated. Keep the app/ variant.
+                if (File.Exists(p) && !(p == appPath && f == "playgo-chunk.dat"))
+                {
+                    File.Delete(p);
+                    Console.WriteLine($"  Delete: {Path.GetRelativePath(root, p)}");
+                }
             }
+        }
+    }
+    else
+    {
+        Console.WriteLine("--- Sony-regen files kept (byte-parity; use --for-orbis to delete) ---");
+    }
+    foreach (string f in junkFiles)
+    {
+        var p = Path.Combine(sceSys, f);
+        if (File.Exists(p))
+        {
+            File.Delete(p);
+            Console.WriteLine($"  Delete: {Path.GetRelativePath(root, p)}");
         }
     }
 
@@ -1013,6 +1047,17 @@ static void RunRepack(string[] args)
             }
         }
 
+        // The PkgReader and its inner-PFS chain are now disposed (end of the
+        // using block above). Force a GC + LOH compaction so extracted file
+        // buffers (Gen 2 / LOH) are returned to the OS BEFORE the memory-heavy
+        // build stage starts. Without this, the GC holds hundreds of MB
+        // of dead extraction buffers committed while the build allocates.
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+            System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+
         // ── 2. Check for inner PFS ──────────────────────────────
         if (!Directory.Exists(image0Dir) ||
             (!File.Exists(Path.Combine(image0Dir, "eboot.bin")) &&
@@ -1096,9 +1141,419 @@ static void RunRepack(string[] args)
 }
 
 /// <summary>
-/// Compares two raw PFS images byte-by-byte for debugging compatibility.
-/// Usage: pfscompare <our.pfs> <orbis.pfs>
+/// Integrate an update PKG into its base PKG, producing one self-contained
+/// base-app PKG at the update's version. Extracts both, overlays the update's
+/// files onto the base dump (overwrite), then repacks the merged dump.
+///
+/// Usage:
+///   merge &lt;base.pkg&gt; &lt;update.pkg&gt; [--out &lt;output.pkg&gt;]
+///        [--passcode X] [--base-passcode X] [--update-passcode X]
+///        [--validate] [--pfsc-mode compressed|store]
+///        [--workers N] [--title "Name"] [--title-id CUSA00001]
+///        [--content-id X] [--work-dir &lt;dir&gt;]
+///
+/// The output PKG is always sealed with the default all-zeros passcode.
 /// </summary>
+static void RunMerge(string[] args)
+{
+    string? basePkg = null, updatePkg = null, outFile = null;
+    string? passcode = null, basePasscode = null, updatePasscode = null;
+    string? title = null, titleId = null, contentId = null;
+    string? workDir = null;
+    bool validate = false;
+    string pfscMode = "compressed";
+    int workers = 1;
+
+    for (int i = 0; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--out"             when i + 1 < args.Length: outFile        = args[++i]; break;
+            case "--passcode"        when i + 1 < args.Length: passcode       = args[++i]; break;
+            case "--base-passcode"   when i + 1 < args.Length: basePasscode  = args[++i]; break;
+            case "--update-passcode" when i + 1 < args.Length: updatePasscode= args[++i]; break;
+            case "--title"           when i + 1 < args.Length: title          = args[++i]; break;
+            case "--title-id"        when i + 1 < args.Length: titleId       = args[++i]; break;
+            case "--content-id"      when i + 1 < args.Length: contentId    = args[++i]; break;
+            case "--pfsc-mode"       when i + 1 < args.Length: pfscMode      = args[++i]; break;
+            case "--work-dir"        when i + 1 < args.Length: workDir      = args[++i]; break;
+            case "--workers" when i + 1 < args.Length && int.TryParse(args[i + 1], out int w) && w >= 0:
+                workers = w; ++i; break;
+            case "--validate": validate = true; break;
+            default:
+                if (!args[i].StartsWith('-'))
+                {
+                    if (basePkg == null) basePkg = args[i];
+                    else if (updatePkg == null) updatePkg = args[i];
+                }
+                break;
+        }
+    }
+
+    if (basePkg == null || updatePkg == null || !File.Exists(basePkg) || !File.Exists(updatePkg))
+    {
+        Console.Error.WriteLine("usage: merge <base.pkg> <update.pkg> [--out <output.pkg>]");
+        Console.Error.WriteLine("              [--passcode X] [--base-passcode X] [--update-passcode X]");
+        Console.Error.WriteLine("              [--validate] [--pfsc-mode compressed|store]");
+        Console.Error.WriteLine("              [--workers N] [--title \"Name\"] [--title-id CUSA00001]");
+        Console.Error.WriteLine("              [--content-id X] [--work-dir <dir>]");
+        Console.Error.WriteLine();
+        Console.Error.WriteLine("  Extract base + update, overlay update files onto base, repack as one PKG.");
+        Console.Error.WriteLine("  Output is always sealed with the default all-zeros passcode.");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    // Resolve per-PKG passcodes: per-PKG flag → shared --passcode → default.
+    string basePc   = !string.IsNullOrEmpty(basePasscode)   ? basePasscode   :
+                      !string.IsNullOrEmpty(passcode)       ? passcode       : PkgBuilder.DefaultPasscode;
+    string updatePc = !string.IsNullOrEmpty(updatePasscode) ? updatePasscode :
+                      !string.IsNullOrEmpty(passcode)       ? passcode       : PkgBuilder.DefaultPasscode;
+    // Output PKG is always sealed with the default passcode.
+    string outPc = PkgBuilder.DefaultPasscode;
+
+    Console.WriteLine("===================================================================");
+    Console.WriteLine("  OrbisPkgTool MERGE");
+    Console.WriteLine($"  Base   : {basePkg}");
+    Console.WriteLine($"  Update : {updatePkg}");
+    Console.WriteLine("===================================================================");
+    Console.WriteLine();
+
+    // ── Pre-checks ─────────────────────────────────────────────
+    bool baseIsPatch = false, updateIsPatch = false;
+    string baseTitleId = "", updateTitleId = "";
+    string baseAppVer = "", updateAppVer = "";
+    uint baseContentType = 0, baseContentFlags = 0;
+
+    try
+    {
+        using (var baseReader = new PkgReader(basePkg, basePc))
+        {
+            if (baseReader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
+                Console.Error.WriteLine($"[warn] base: {baseReader.PasscodeStatus}");
+            var baseInfo = baseReader.GetInfo();
+            baseIsPatch = baseInfo.Type == PkgType.Patch;
+            baseTitleId = baseInfo.TitleId;
+            baseAppVer = baseInfo.AppVersion;
+            baseContentType = baseInfo.ContentType;
+            baseContentFlags = baseInfo.ContentFlags;
+            if (baseIsPatch)
+            {
+                Console.Error.WriteLine("[error] Base PKG is a patch (CATEGORY=gp), not a base app.");
+                Console.Error.WriteLine("        merge requires a base app PKG to overlay the update onto.");
+                Environment.ExitCode = 1;
+                return;
+            }
+            Console.WriteLine($"  Base   : {baseInfo.Title} | {baseTitleId} | app {baseAppVer}");
+        }
+
+        using (var updateReader = new PkgReader(updatePkg, updatePc))
+        {
+            if (updateReader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
+                Console.Error.WriteLine($"[warn] update: {updateReader.PasscodeStatus}");
+            var updateInfo = updateReader.GetInfo();
+            updateIsPatch = updateInfo.Type == PkgType.Patch;
+            updateTitleId = updateInfo.TitleId;
+            updateAppVer = updateInfo.AppVersion;
+            Console.WriteLine($"  Update : {updateInfo.Title} | {updateTitleId} | app {updateAppVer}");
+            if (!updateIsPatch)
+                Console.Error.WriteLine($"[warn] Update PKG is not a patch (CATEGORY={updateInfo.Type}). Proceeding anyway.");
+        }
+
+        if (!string.Equals(baseTitleId, updateTitleId, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine($"[error] TITLE_ID mismatch: base={baseTitleId} update={updateTitleId}");
+            Console.Error.WriteLine("        The base and update must be for the same game.");
+            Environment.ExitCode = 1;
+            return;
+        }
+
+        // Warn if the update version is not newer (likely wrong order).
+        if (Version.TryParse(baseAppVer, out var bV) && Version.TryParse(updateAppVer, out var uV) && uV <= bV)
+        {
+            Console.Error.WriteLine($"[warn] Update version ({updateAppVer}) is not newer than base ({baseAppVer}).");
+            Console.Error.WriteLine("       The update should usually have a higher version number.");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[error] Pre-check failed: {ex.Message}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    // ── Setup work directory ────────────────────────────────────
+    if (workDir == null)
+    {
+        string baseName = Path.GetFileNameWithoutExtension(basePkg);
+        var safe = new string(baseName.Select(c =>
+                Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray());
+        if (safe.Length > 40) safe = safe[..40];
+        workDir = Path.Combine(Path.GetTempPath(), $"pkg_merge_{safe}_{Guid.NewGuid().ToString("N")[..12]}");
+    }
+    Directory.CreateDirectory(workDir);
+    string dumpBaseDir  = Path.Combine(workDir, "dump_base");
+    string dumpUpdDir   = Path.Combine(workDir, "dump_upd");
+    string image0Dir    = Path.Combine(dumpBaseDir, "Image0");
+    string gp4Path      = Path.Combine(workDir, "project.gp4");
+    string profilePath  = Path.Combine(workDir, "pfsc_profile.json");
+
+    if (outFile == null)
+        outFile = Path.Combine(workDir, Path.GetFileNameWithoutExtension(basePkg) + "_merged.pkg");
+
+    Console.WriteLine($"Work dir : {workDir}");
+    Console.WriteLine($"Output   : {outFile}");
+    Console.WriteLine();
+
+    var overallSw = System.Diagnostics.Stopwatch.StartNew();
+
+    try
+    {
+        // ── 1. Extract base ───────────────────────────────────────
+        Console.WriteLine("[1/6] Extracting base PKG...");
+        List<OrbisPkgTool.Pfs.PfscFilePolicy>? baseProfileFiles = null;
+        ExtractOne(basePkg, basePc, dumpBaseDir, "  base");
+
+        // Profile the base BEFORE its reader is disposed (needs the
+        // un-disposed reader's PFS layers). With --pfsc-mode compressed
+        // this is replayed into the GP4 so the rebuild matches the
+        // original's raw/compressed decisions.
+        if (pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase))
+        {
+            baseProfileFiles = ProfileOne(basePkg, basePc, "  base");
+        }
+
+        // GC between the two extractions so the base's reader buffers
+        // are released before the update's reader allocates.
+        GcCompact();
+
+        // ── 2. Extract update ─────────────────────────────────────
+        Console.WriteLine("[2/6] Extracting update PKG...");
+        ExtractOne(updatePkg, updatePc, dumpUpdDir, "  update");
+
+        List<OrbisPkgTool.Pfs.PfscFilePolicy>? updateProfileFiles = null;
+        if (pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase))
+        {
+            updateProfileFiles = ProfileOne(updatePkg, updatePc, "  update");
+        }
+
+        // GC before the overlay (no more readers needed).
+        GcCompact();
+
+        // ── 3. Overlay update onto base ────────────────────────────
+        Console.WriteLine("[3/6] Overlaying update onto base...");
+        int replaced = 0, added = 0, skippedSfo = 0;
+        // Move Image0/** and Sc0/** from dump_upd into dump_base with overwrite.
+        foreach (string sub in new[] { "Image0", "Sc0" })
+        {
+            string srcDir = Path.Combine(dumpUpdDir, sub);
+            if (!Directory.Exists(srcDir)) continue;
+            string dstDir = Path.Combine(dumpBaseDir, sub);
+            foreach (string file in Directory.GetFiles(srcDir, "*", SearchOption.AllDirectories))
+            {
+                string rel = Path.GetRelativePath(srcDir, file).Replace('\\', '/');
+                // The update's param.sfo must NOT replace the base's: it
+                // carries CATEGORY=gp (patch), which would mislabel the
+                // merged PKG as a patch. Keep the base's sfo and patch
+                // only its version fields below (community
+                // "integrate update into base" convention: APP_VER and
+                // VERSION = the update's APP_VER).
+                bool isSfo = (sub == "Sc0"   && rel.Equals("param.sfo",             StringComparison.OrdinalIgnoreCase))
+                          || (sub == "Image0" && rel.Equals("sce_sys/param.sfo",    StringComparison.OrdinalIgnoreCase));
+                if (isSfo) { skippedSfo++; continue; }
+                string dest = Path.Combine(dstDir, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                bool exists = File.Exists(dest);
+                File.Move(file, dest, overwrite: true);
+                if (exists) replaced++; else added++;
+            }
+        }
+        Console.WriteLine($"  Replaced: {replaced} files, Added: {added} files" +
+            (skippedSfo > 0 ? $", kept base param.sfo ({skippedSfo} location(s) skipped)" : ""));
+
+        // Patch the base's param.sfo version fields to the update's APP_VER.
+        // Everything else in the base sfo (CATEGORY=gd, ATTRIBUTE, PUBTOOLINFO,
+        // SYSTEM_VER, ...) is preserved — only the version moves forward.
+        if (!string.IsNullOrEmpty(updateAppVer))
+        {
+            foreach (string sfoPath in new[] {
+                         Path.Combine(dumpBaseDir, "Sc0", "param.sfo"),
+                         Path.Combine(dumpBaseDir, "Image0", "sce_sys", "param.sfo") })
+            {
+                if (!File.Exists(sfoPath)) continue;
+                var sfo = OrbisPkgTool.Sfo.ParamSfo.Parse(File.ReadAllBytes(sfoPath));
+                sfo.SetString("APP_VER", updateAppVer, 0x8);
+                sfo.SetString("VERSION", updateAppVer, 0x8);
+                File.WriteAllBytes(sfoPath, sfo.Serialize());
+                Console.WriteLine($"  param.sfo: APP_VER/VERSION -> {updateAppVer} (CATEGORY={sfo.GetString("CATEGORY")} kept)");
+            }
+        }
+        else
+        {
+            Console.Error.WriteLine("[warn] Update has no APP_VER — base param.sfo versions left unchanged.");
+        }
+        // Free the (now-empty) update dump to save disk for the build.
+        Directory.Delete(dumpUpdDir, recursive: true);
+        Console.WriteLine($"  Freed update dump: {dumpUpdDir}");
+
+        // ── 4. Restructure merged dump ────────────────────────────
+        Console.WriteLine("[4/6] Restructuring merged dump...");
+        RunRestructure([dumpBaseDir]);
+
+        // ── 4b. Merge PFSC profiles (union, update wins) ─────────
+        List<OrbisPkgTool.Pfs.PfscFilePolicy>? mergedProfile = null;
+        if (baseProfileFiles != null)
+        {
+            // Start with base; overlay update's policies (update wins on conflicts).
+            var byPath = new Dictionary<string, OrbisPkgTool.Pfs.PfscPolicy>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in baseProfileFiles)
+                byPath[f.Path] = f.Policy;
+            int baseOnly = byPath.Count;
+            if (updateProfileFiles != null)
+            {
+                int updReplaced = 0, updNew = 0;
+                foreach (var f in updateProfileFiles)
+                {
+                    if (byPath.ContainsKey(f.Path)) { updReplaced++; }
+                    else { updNew++; }
+                    byPath[f.Path] = f.Policy;
+                }
+                Console.WriteLine($"  PFSC union: {baseOnly} base + {updateProfileFiles.Count} update ({updReplaced} replaced, {updNew} new) = {byPath.Count} merged");
+            }
+            mergedProfile = byPath.Select(kv =>
+                new OrbisPkgTool.Pfs.PfscFilePolicy(kv.Key, 0, 0, kv.Value)).ToList();
+            long disabled = mergedProfile.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Disable);
+            long enabled  = mergedProfile.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Enable);
+            Console.WriteLine($"  PFSC profile: {mergedProfile.Count} files ({enabled} compressed, {disabled} stored raw)");
+        }
+
+        // Persist the merged profile (sidecar, OUTSIDE Image0 so gp4gen
+        // never packages it into the rebuilt PFS).
+        if (mergedProfile != null)
+        {
+            File.WriteAllText(profilePath, OrbisPkgTool.Pfs.PfscProfiler.ToJson(mergedProfile));
+            Console.WriteLine($"  Compression profile saved: {profilePath}");
+        }
+
+        // ── 5. Generate GP4 (NO --patch — this is a base app) ────
+        Console.WriteLine("[5/6] Generating GP4 project...");
+        var gp4Args = new List<string> { image0Dir, "--out", gp4Path };
+        // merge always produces a base app, never a patch
+        if (title != null)      { gp4Args.Add("--title");      gp4Args.Add(title); }
+        if (titleId != null)    { gp4Args.Add("--title-id");   gp4Args.Add(titleId); }
+        if (contentId != null)  { gp4Args.Add("--content-id"); gp4Args.Add(contentId); }
+        if (outPc != PkgBuilder.DefaultPasscode) { gp4Args.Add("--passcode"); gp4Args.Add(outPc); }
+        if (mergedProfile != null) { gp4Args.Add("--pfsc-profile"); gp4Args.Add(profilePath); }
+        RunGp4Gen(gp4Args.ToArray());
+
+        // ── 5b. Build (with base's content_type/flags, NOT update's) ─
+        Console.WriteLine("[5b/6] Building merged PKG (pure C#)...");
+        var buildArgs = new List<string> { gp4Path, image0Dir, "--out", outFile, "--passcode", outPc };
+        if (pfscMode != "store") { buildArgs.Add("--pfsc-mode"); buildArgs.Add(pfscMode); }
+        if (workers != 1)        { buildArgs.Add("--workers");    buildArgs.Add(workers.ToString()); }
+        // Carry the BASE's content_type/content_flags — not the update's
+        // (patch flags would mislabel the merged PKG as a patch).
+        if (baseContentType != 0)  { buildArgs.Add("--content-type");  buildArgs.Add($"0x{baseContentType:X}"); }
+        if (baseContentFlags != 0) { buildArgs.Add("--content-flags"); buildArgs.Add($"0x{baseContentFlags:X}"); }
+        RunPkgBuild(buildArgs.ToArray());
+        if (Environment.ExitCode != 0 || !File.Exists(outFile))
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("[error] PKG build failed. Output package was not created.");
+            Console.Error.WriteLine($"Work dir kept for debugging: {workDir}");
+            Environment.ExitCode = Environment.ExitCode == 0 ? 1 : Environment.ExitCode;
+            return;
+        }
+        var pkgSize = new FileInfo(outFile).Length;
+        Console.WriteLine($"  Output: {outFile} ({pkgSize / 1024.0 / 1024.0:F1} MB)");
+
+        // ── 6. Validate ─────────────────────────────────────────
+        if (validate)
+        {
+            Console.WriteLine("[6/6] Validating merged PKG...");
+            RunValidate(outFile, outPc);
+        }
+
+        overallSw.Stop();
+        Console.WriteLine();
+        Console.WriteLine("===================================================================");
+        Console.WriteLine($"  MERGE COMPLETE in {overallSw.Elapsed.TotalSeconds:F1}s");
+        Console.WriteLine($"  Output: {outFile}");
+        Console.WriteLine($"  Work:   {workDir}");
+        Console.WriteLine("===================================================================");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine();
+        Console.Error.WriteLine($"[error] Merge failed: {ex.Message}");
+        if (ex.StackTrace != null)
+            Console.Error.WriteLine(ex.StackTrace);
+        Console.Error.WriteLine($"Work dir kept for debugging: {workDir}");
+        Environment.ExitCode = 1;
+    }
+
+    // ── Local helpers ──────────────────────────────────────────
+    static void ExtractOne(string pkg, string pc, string dumpDir, string label)
+    {
+        using var reader = new PkgReader(pkg, pc);
+        Directory.CreateDirectory(dumpDir);
+        int done = 0, total = 0;
+        var extractFailures = reader.ExtractAll(dumpDir,
+            new Progress<(int Current, int Total, string File)>(p =>
+        {
+            done = p.Current; total = p.Total;
+            int pct = total > 0 ? (int)(100.0 * done / total) : 0;
+            string line = $"{label} [{pct,3}%] {p.File}";
+            int w = SafeWindowWidth();
+            if (line.Length < w) line += new string(' ', w - line.Length);
+            Console.Write($"\r{line}");
+        }), new ExtractAllOptions());
+        if (total > 0) Console.WriteLine($"\r{label} [100%] {total - extractFailures.Count}/{total} files extracted.".PadRight(SafeWindowWidth()));
+        if (extractFailures.Count > 0)
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine($"[error] {extractFailures.Count} file(s) failed to extract — aborting.");
+            foreach (var f in extractFailures)
+                Console.Error.WriteLine($"  {f.Path}: {f.Exception.Message}");
+            throw new InvalidOperationException("extraction failed");
+        }
+    }
+
+    static List<OrbisPkgTool.Pfs.PfscFilePolicy>? ProfileOne(string pkg, string pc, string label)
+    {
+        try
+        {
+            var files = OrbisPkgTool.Pfs.PfscProfiler.Profile(pkg, pc,
+                out var stats, out var profileError);
+            if (files != null)
+            {
+                long disabled = files.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Disable);
+                long enabled  = files.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Enable);
+                Console.WriteLine($"{label} PFSC profile: {files.Count} files ({enabled} compressed, {disabled} stored raw)");
+            }
+            else
+            {
+                Console.WriteLine($"{label} [note] {profileError ?? "no PFSC profile"} — building with uniform compression");
+            }
+            return files;
+        }
+        catch (Exception pex)
+        {
+            Console.WriteLine($"{label} [note] PFSC profiling failed ({pex.Message}) — building with uniform compression");
+            return null;
+        }
+    }
+
+    static void GcCompact()
+    {
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+            System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+    }
+}
+
 /// <summary>
 /// ShadPS4 PKG reader diagnostic — mirrors shadPS4's exact PKG reading
 /// logic step by step to find where the installer crashes on rebuilt PKGs.
@@ -1239,6 +1694,10 @@ static void RunPfscProfile(string[] args)
     }
 }
 
+/// <summary>
+/// Compares two raw PFS images byte-by-byte for debugging compatibility.
+/// Usage: pfscompare <our.pfs> <orbis.pfs>
+/// </summary>
 static void RunPfsCompare(string[] args)
 {
     if (args.Length < 2) { Console.Error.WriteLine("usage: pfscompare <our.pfs> <orbis.pfs>"); return; }
@@ -2967,39 +3426,67 @@ static void DecryptSector(byte[] data, int offset, ulong sector, byte[] dataKey,
 static void PrintUsage()
 {
     Console.WriteLine(@"
-OrbisPkgTool : PS4 PKG command-line tool
-  Default passcode: 00000000000000000000000000000000
+OrbisPkgTool : build, inspect, extract and check PS4 .pkg files
+
+  Usage:
+    OrbisPkgTool <command> [options] <arguments>
+    OrbisPkgTool <command> --help     (detailed help + examples for one command)
+
+  Placeholders used below:
+    <pkg>       a .pkg file               e.g.  game.pkg
+    <folder>    a folder of game files    e.g.  Image0
+    <out-dir>   folder to extract into    e.g.  extracted
+    <out.pkg>   .pkg file to create       e.g.  my_game.pkg
+    <out.gp4>   .gp4 project to create    e.g.  project.gp4
 
   Commands:
-    list        : List files in a PKG              (list -h for details)
-    extract     : Extract files from a PKG         (extract -h for details)
-    verify      : Verify PKG hashes/signatures
-    info        : Show PKG metadata
-    inspect     : Full PFS tree dump
-    validate    : 8-stage structural validation
-                  (--fake-tolerant: warn on zeroed digests, scene-FPKG compatible)
-    build       : Build a fake PKG from GP4        (build -h for details)
-    orbis-build : Build a fake PKG using orbis-pub-cmd
-    repack      : Extract + restructure + gp4gen + build (one-shot)
-                  (auto-replays the original's per-file compression policy)
-    gp4gen      : Generate GP4 from a folder       (gp4gen -h for details)
-    restructure : Restructure dump for build (--check dry-run)
-    sweep       : Batch verify PKGs in a folder
-    bench        : Benchmark listing speed
-    selftest    : Validate RSA keys
-    sfo         : param.sfo tools                  (sfo -h for details)
-    trp         : Trophy TRP tools                 (trp -h for details)
 
-  Diagnostic:
-    pfscprofile    : PFSC compression stats + per-file policy (replay source)
-    shadps4diag    : Mirror shadPS4 PKG reading logic step-by-step
-    s4trace        : Exact shadPS4Plus allocation/bounds replica
-    s4extract      : Exact shadPS4Plus Extract + ExtractFiles replica
-    s4crypto       : Replicate shadPS4 crypto chain
-    pkgfields      : Dump all PKG header/entry fields for A/B comparison
-    signverify, pfsdump, pfsblock, innerfpt, iblock,
-    fixdigests, resignpfs, xtstest, buildtest, emptypayload,
-    pfscompare, dumppfsc, xtsdump, inflatecheck, deftest, blkcount
+    Look inside a PKG:
+      info        <pkg>                      show title, IDs, version, passcode
+      list        <pkg>                      list all files and folders
+      extract     <pkg> <out-dir>            extract everything (or a single file)
+      entries     <pkg>                      dump the raw PKG entry table
+
+    Check a PKG:
+      validate    <pkg> [--fake-tolerant]    deep 8-stage check (recommended)
+      verify      <pkg>                      quick hash + signature check
+      sweep       <folder>                   check every .pkg under a folder
+
+    Create a PKG:
+      gp4gen      <folder> [--out <out.gp4>]   make a GP4 project from a folder
+      build       <project.gp4> <folder>       build a PKG from a GP4 project
+      repack      <pkg> [--out <out.pkg>]      full extract + rebuild in one step
+      merge       <base.pkg> <update.pkg>      integrate an update into its base
+      orbis-build <project.gp4> <folder>       build using Sony's orbis-pub-cmd
+
+    Prepare / convert:
+      restructure <dump-folder> [--check]   tidy an extracted dump for building
+      sfo         read|create|set|check     param.sfo tools
+      trp         list|extract|create       trophy (.trp) tools
+
+    Other:
+      inspect     <pkg>                     full PFS tree dump (debugging)
+      bench       <pkg>                     measure listing speed
+      selftest                              check the built-in crypto keys
+
+  Common option (accepted by most commands):
+    --passcode <code>    32-character passcode (default: 00000000000000000000000000000000)
+
+  Examples:
+    OrbisPkgTool info ""My Game [CUSA12345].pkg""
+    OrbisPkgTool extract game.pkg extracted
+    OrbisPkgTool extract game.pkg:Sc0/param.sfo extracted
+    OrbisPkgTool validate --fake-tolerant scene_fpkg.pkg
+    OrbisPkgTool gp4gen Image0 --out project.gp4
+    OrbisPkgTool build project.gp4 Image0 --out my_game.pkg
+    OrbisPkgTool repack original.pkg --out rebuilt.pkg
+    OrbisPkgTool merge base.pkg update.pkg --out merged.pkg
+
+  Diagnostics (PKG internals debugging; each takes a <pkg> unless noted):
+    pfscprofile shadps4diag s4trace s4extract s4crypto pkgfields signverify
+    pfsdump pfsblock innerfpt iblock fixdigests resignpfs xtstest buildtest
+    emptypayload pfscompare dumppfsc dumpinner xtsdump inflatecheck deftest
+    blkcount
 ");
 }
 
@@ -3010,116 +3497,298 @@ static void PrintCommandHelp(string cmd)
     {
         case "list": case "img_list": case "img_file_list":
             h.WriteLine(@"
-list : List all files and directories in a PKG
+list : List all files and folders inside a PKG
 
   Usage:
-    list [--passcode <32ch>] [--oformat short|long+original_size|packed_size] <pkg>
+    list [options] <pkg>
+
+  Options:
+    --passcode <code>     32-char passcode (default: the fake-PKG passcode)
+    --oformat <format>    short | long+original_size (default) | packed_size
+                          original_size = real file size, packed_size = size
+                          inside the PKG (smaller when compressed)
 
   Examples:
     list game.pkg
-    list --oformat long+original_size game.pkg
+    list --oformat packed_size game.pkg
     list --passcode 00000000000000000000000000000000 game.pkg
 "); break;
         case "extract": case "img_extract":
             h.WriteLine(@"
-extract : Extract files from a PKG
+extract : Extract files from a PKG to a folder
 
   Usage:
-    extract [--passcode <32ch>] [--verbose|-v] <pkg> <out_dir>
-    extract [--passcode <32ch>] <pkg>:<entry_path> <out_dir>
+    extract [options] <pkg> <out-dir>              extract everything
+    extract [options] <pkg>:<file-path> <out-dir>  extract a single file
 
   Options:
-    --verbose, -v   Show per-file progress and percentage
+    --passcode <code>     32-char passcode (default: the fake-PKG passcode)
+    --verbose, -v         show per-file progress
 
   Examples:
-    extract game.pkg out/
-    extract --verbose game.pkg out/
-    extract game.pkg:Sc0/param.sfo out/
-    extract game.pkg:Image0/eboot.bin out/
+    extract game.pkg extracted
+    extract --verbose game.pkg extracted
+    extract game.pkg:Sc0/param.sfo extracted
+    extract game.pkg:Image0/eboot.bin extracted
 "); break;
         case "verify":
             h.WriteLine(@"
-verify : Verify all PKG header hashes and signatures (fast, CPU only)
+verify : Quick check of PKG header hashes and signatures (fast, CPU only)
 
-  Usage:  verify <pkg>
+  Usage:
+    verify <pkg>
+
+  For a deep structural check use:  validate <pkg>
 "); break;
         case "info": case "pkginfo":
             h.WriteLine(@"
-info : Show PKG metadata (title, content ID, category, version, size)
-
-  Usage:  info <pkg>
-"); break;
-        case "inspect": case "debug":
-            h.WriteLine(@"
-inspect : Full PFS tree dump (outer + inner), useful for debugging
-
-  Usage:  inspect [--passcode <32ch>] <pkg>
-"); break;
-        case "build": case "pkg":
-            h.WriteLine(@"
-build : Build a fake PKG from a GP4 project
-  Generates orbis-compatible GP4 + param.sfo, delegates to orbis-pub-cmd img_create.
+info : Show PKG metadata (title, title ID, content ID, category, versions)
 
   Usage:
-    build <project.gp4> <source_folder> [--passcode <32ch>] [--out <file.pkg>]
-
-  Examples:
-    build game.gp4 ./files --out game.pkg
-    build game.gp4 ./files --passcode 00000000000000000000000000000000
-"); break;
-        case "gp4gen": case "gp4":
-            h.WriteLine(@"
-gp4gen : Scan a folder and generate a GP4 project file
-
-  Usage:
-    gp4gen <folder> [--patch] [--title ""Name""] [--title-id CUSA00001]
-            [--content-id EP0001-CUSA00001_00-MYGAME000000001]
-            [--passcode <32ch>] [--out <file.gp4>]
+    info [--passcode <code>] <pkg>
 
   Example:
-    gp4gen ./game --title ""My Game"" --title-id CUSA00001 --out game.gp4
+    info game.pkg
 "); break;
         case "validate":
             h.WriteLine(@"
-validate : 8-stage structural validation of a built PKG
+validate : Deep 8-stage structural check of a PKG (recommended)
+
+  Checks header, entry table, outer PFS, PFSC, inner PFS, digests,
+  signatures and the full filesystem walk.
 
   Usage:
-    validate [--passcode <32ch>] [--fake-tolerant] <pkg>
+    validate [options] <pkg>
 
   Options:
-    --fake-tolerant   Treat all-zero stored digests/signatures as warnings
-                      instead of failures (scene FPKGs omit real signatures).
-                      Non-zero mismatches still hard-fail.
+    --passcode <code>      32-char passcode (default: the fake-PKG passcode)
+    --fake-tolerant        treat all-zero digests/signatures (common in scene
+                           FPKGs) as warnings instead of failures;
+                           non-zero mismatches still fail
 
   Examples:
     validate game.pkg
-    validate --fake-tolerant --passcode 00000000000000000000000000000000 game.pkg
+    validate --fake-tolerant scene_fpkg.pkg
+"); break;
+        case "entries":
+            h.WriteLine(@"
+entries : Dump the raw PKG entry table (id, name, size, offset)
+
+  Usage:
+    entries <pkg>
+"); break;
+        case "inspect": case "debug":
+            h.WriteLine(@"
+inspect : Dump the full PFS tree (outer + inner), for debugging
+
+  Usage:
+    inspect [--passcode <code>] <pkg>
+"); break;
+        case "build": case "pkg":
+            h.WriteLine(@"
+build : Build a PKG from a GP4 project
+
+  Usage:
+    build <project.gp4> <folder> [options]
+
+  Options:
+    --out <out.pkg>           output file (default: <project>.pkg)
+    --passcode <code>         32-char passcode (default: the fake-PKG passcode)
+    --pfsc-mode <mode>        compressed (default) | store (no compression)
+    --workers <n>             1 (default) for serial, 0 = all cores;
+                              parallel build is byte-identical
+    --validate                run the 8-stage check on the result
+    --manifest <file.json>    write a build manifest next to the PKG
+    --content-type <hex>      override header content type (e.g. 0x1A)
+    --content-flags <hex>     override header content flags
+
+  Examples:
+    build project.gp4 Image0 --out my_game.pkg
+    build project.gp4 Image0 --workers 0 --validate
+"); break;
+        case "orbis-build":
+            h.WriteLine(@"
+orbis-build : Build a PKG from a GP4 project using Sony's orbis-pub-cmd
+
+  Usage:
+    orbis-build <project.gp4> <folder> [options]
+
+  Options:
+    --out <out.pkg>       output file (default: <project>.pkg)
+    --passcode <code>     32-char passcode (default: the fake-PKG passcode)
+
+  Example:
+    orbis-build project.gp4 Image0 --out my_game.pkg
+"); break;
+        case "gp4gen": case "gp4":
+            h.WriteLine(@"
+gp4gen : Create a GP4 project file from a folder of game files
+
+  Title / title ID / content ID are read from sce_sys/param.sfo
+  when present; options below override them.
+
+  Usage:
+    gp4gen <folder> [options]
+
+  Options:
+    --out <out.gp4>        output file (default: print GP4 to console)
+    --patch                make a patch project instead of a base app
+    --title <name>         game title
+    --title-id <id>        title ID (e.g. CUSA00001)
+    --content-id <id>      content ID (e.g. EP0001-CUSA00001_00-MYGAME000000001)
+    --passcode <code>      32-char passcode
+    --pfsc-profile <file>  JSON profile from 'pfscprofile --out' to replay the
+                           original PKG's per-file compression choices
+
+  Example:
+    gp4gen Image0 --title ""My Game"" --title-id CUSA00001 --out project.gp4
+"); break;
+        case "repack":
+            h.WriteLine(@"
+repack : Extract a PKG and rebuild it, in one command
+
+  Runs: extract -> restructure -> gp4gen -> build.
+  The original's per-file compression policy is replayed automatically.
+
+  Usage:
+    repack <pkg> [options]
+
+  Options:
+    --out <out.pkg>        output file (default: work-dir\<pkg>_rebuilt.pkg)
+    --passcode <code>      32-char passcode (default: the fake-PKG passcode)
+    --validate             run the 8-stage check on the result
+    --pfsc-mode <mode>     compressed (default) | store
+    --workers <n>          1 (default) for serial, 0 = all cores
+    --title <name>         override the game title
+    --title-id <id>        override the title ID
+    --content-id <id>      override the content ID
+    --work-dir <dir>       keep intermediate files in this folder
+
+  Example:
+    repack original.pkg --out rebuilt.pkg --validate
+
+  Note: works on app PKGs (game files). Update/DLC PKGs have no inner
+  PFS and cannot be repacked.
+"); break;
+        case "merge":
+            h.WriteLine(@"
+merge : Integrate an update PKG into its base PKG, producing one PKG
+
+  Extracts both PKGs, overlays the update's files onto the base dump
+  (overwrite), then repacks the merged dump as a single base-app PKG.
+  The result is a self-contained PKG at the update's version that
+  installs in one step and does not need the separate update PKG.
+
+  Saves work because the builder auto-injects sce_sys/keystone for
+  pkg_ps4_app builds (the classic save-error trap).
+
+  Usage:
+    merge <base.pkg> <update.pkg> [options]
+
+  Options:
+    --out <out.pkg>        output file (default: work-dir\<base>_merged.pkg)
+    --passcode <code>      shared passcode for both PKGs (default: all-zeros)
+    --base-passcode <c>    base PKG passcode (rare: when base uses a non-
+                           default passcode; overrides --passcode for base)
+    --update-passcode <c>  update PKG passcode (overrides --passcode for update)
+    --validate             run the 8-stage check on the result
+    --pfsc-mode <mode>     compressed (default) | store
+    --workers <n>          1 (default) for serial, 0 = all cores
+    --title <name>         override the game title
+    --title-id <id>        override the title ID
+    --content-id <id>      override the content ID
+    --work-dir <dir>       keep intermediate files in this folder
+
+  The output PKG is always sealed with the default all-zeros passcode,
+  regardless of the inputs' passcodes.
+
+  Example:
+    merge ""Game [CUSA00001] 00 - Base.pkg"" ""Game [CUSA00001] 01 - Update v01.09.pkg"" --out merged.pkg --validate
+
+  Pre-checks: base must be an app PKG (not a patch); base and update
+  TITLE_IDs must match; warns if the update version is not newer.
+"); break;
+        case "restructure": case "restruct":
+            h.WriteLine(@"
+restructure : Tidy an extracted PKG dump so it is ready for gp4gen/build
+
+  Merges Sc0\ into Image0\sce_sys\ and removes files the build
+  regenerates (license, playgo, psreserved...).
+
+  Usage:
+    restructure <dump-folder> [options]
+
+  Options:
+    --check       dry-run: report what would change, modify nothing
+    --verbose, -v show more detail
+
+  Example:
+    restructure dump --check
 "); break;
         case "sweep":
             h.WriteLine(@"
-sweep : Batch verify all .pkg files in a folder
+sweep : Check every .pkg under a folder (batch mode)
 
-  Usage:  sweep <folder> [--list] [--out <results.tsv>]
+  Opens each PKG, reads its metadata, and writes a report.
+
+  Usage:
+    sweep <folder> [options]
+
+  Options:
+    --out <file.tsv>   report file (default: sweep_report.tsv in the
+                       current directory)
+    --list             also list the files inside each PKG (slower)
+
+  Example:
+    sweep ""B:\PKG collection"" --out report.tsv
 "); break;
         case "sfo":
             h.WriteLine(@"
-sfo : param.sfo tools
+sfo : param.sfo tools (create, read, edit, check)
 
-  sfo read <file.sfo>              Read and display SFO entries
-  sfo create <out.sfo> [options]   Create new param.sfo
-       --title ""Name"" --title-id CUSA00001
-       --content-id EP0001-CUSA00001_00-MYGAME000000001
-       --category gd|ac|gp
-  sfo set <file.sfo> <key> <val>   Set SFO entry
-  sfo check <file.sfo>             Validate SFO format
+  Usage:
+    sfo read <file.sfo>                    show all entries
+    sfo create <out.sfo> [options]         create a new param.sfo
+    sfo set <file.sfo> <key> <value>       change one entry
+    sfo check <file.sfo>                   validate the format
+
+  'create' options:
+    --title <name>        game title
+    --title-id <id>       title ID (e.g. CUSA00001)
+    --content-id <id>     content ID
+    --category <type>     gd (game, default) | ac (addon/DLC) | gp (patch)
+
+  Examples:
+    sfo read sce_sys\param.sfo
+    sfo create param.sfo --title ""My Game"" --title-id CUSA00001
+    sfo set param.sfo APP_VER 01.02
 "); break;
         case "trp":
             h.WriteLine(@"
-trp : Trophy TRP tools
+trp : trophy (.trp) file tools
 
-  trp list <file.trp>              List TRP entries
-  trp extract <file.trp> [dir]     Extract TRP to directory
-  trp create <out.trp> <files..>   Create TRP from files
+  Usage:
+    trp list <file.trp>                  list trophy entries
+    trp extract <file.trp> [out-dir]     extract to a folder (default: .)
+    trp create <out.trp> <file> [...]    pack files into a .trp
+
+  Examples:
+    trp list trophies.trp
+    trp extract trophies.trp trophies_out
+"); break;
+        case "bench":
+            h.WriteLine(@"
+bench : Measure how fast the PKG file listing is
+
+  Usage:
+    bench <pkg>
+"); break;
+        case "selftest": case "self-test":
+            h.WriteLine(@"
+selftest : Check that the built-in RSA keys are valid
+
+  Usage:
+    selftest
 "); break;
         default:
             h.WriteLine($"No detailed help for '{cmd}'. Run without arguments to see all commands.");

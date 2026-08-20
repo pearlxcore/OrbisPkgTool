@@ -69,6 +69,9 @@ build       : Build a fake PKG from GP4        (build -h for details)
 orbis-build : Build a fake PKG using orbis-pub-cmd
 repack      : Extract + restructure + gp4gen + build (one-shot)
               (auto-replays the original's per-file compression policy)
+merge       : Integrate an update into its base → one self-contained
+              base-app PKG at the update's version (keystone injected,
+              saves work; output sealed with the default passcode)
 gp4gen      : Generate GP4 from a folder       (gp4gen -h for details)
 restructure : Restructure dump for build (--check dry-run)
 sweep       : Batch verify PKGs in a folder
@@ -116,6 +119,13 @@ OrbisPkgTool.exe build game.gp4 ./Image0 --out game.pkg --passcode 0000000000000
 # replay of the ORIGINAL's per-file compression policy (default --pfsc-mode
 # compressed). This is the recommended path for repacking scene FPKGs.
 OrbisPkgTool.exe repack original.pkg --out rebuilt.pkg
+
+# Merge a base PKG with its update PKG — extracts both, overlays the
+# update's files onto the base dump, and repacks as a single base-app PKG
+# at the update's version. The output is sealed with the default passcode.
+# CATEGORY=gd is kept from the base (so saves work); only APP_VER/VERSION
+# move forward to the update's. Pass --validate to run the 8-stage check.
+OrbisPkgTool.exe merge "Game [CUSA00001] 00 - Base.pkg" "Game [CUSA00001] 01 - Update v01.09.pkg" --out merged.pkg --validate
 
 # Inspect the original's PFSC compression profile, optionally save the
 # policy JSON for use with gp4gen --pfsc-profile, and diff against a

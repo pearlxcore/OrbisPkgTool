@@ -1,13 +1,31 @@
 namespace OrbisPkgTool.Gui;
 
+using System.Collections.Concurrent;
+using System.Text;
+
 /// <summary>
 /// Bottom-of-window output console: one tab per run, live-streaming,
 /// ✓/✗ exit markers, per-tab close, and a cap of 10 tabs (oldest
 /// finished run is dropped first).
+///
+/// Output lines are BATCHED: worker threads enqueue into a concurrent
+/// queue and a 100ms UI timer flushes them in one append+scroll. The old
+/// per-line BeginInvoke flooded the message pump during progress-heavy
+/// stages (PFSC emits ~17k lines for a 1 GB game), freezing the form.
 /// </summary>
 public sealed class OutputConsole : UserControl
 {
     private const int MaxTabs = 10;
+
+    /// <summary>UI text buffer cap — beyond this the head is trimmed so
+    /// AppendText stays O(1)-ish on long runs.</summary>
+    private const int MaxTextChars = 50_000;
+
+    /// <summary>Characters kept when the head is trimmed.</summary>
+    private const int TrimKeepChars = 30_000;
+
+    /// <summary>Flush interval for the batched output queue.</summary>
+    private const int FlushIntervalMs = 100;
 
     private readonly TabControl _tabs = new();
     private readonly List<TabPage> _pages = [];
@@ -17,12 +35,22 @@ public sealed class OutputConsole : UserControl
     /// <summary>Set of pages whose run has not finished yet (never auto-dropped).</summary>
     private readonly HashSet<TabPage> _running = new();
 
+    /// <summary>Batched output: page → lines waiting for the timer flush.</summary>
+    private readonly ConcurrentQueue<(TabPage Page, string Text)> _pending = new();
+
+    /// <summary>Drains <see cref="_pending"/> on the UI thread every 100ms.</summary>
+    private readonly System.Windows.Forms.Timer _flushTimer = new();
+
     public event EventHandler? AllRunsCleared;
 
     public OutputConsole()
     {
         Dock = DockStyle.Fill;
         BuildLayout();
+
+        _flushTimer.Interval = FlushIntervalMs;
+        _flushTimer.Tick += (_, _) => FlushPending();
+        _flushTimer.Start();
     }
 
     // ------------------------------------------------------------------
@@ -129,20 +157,52 @@ public sealed class OutputConsole : UserControl
         return page;
     }
 
-    /// <summary>Streams one line into the given run's page (thread-safe).</summary>
+    /// <summary>Streams one line into the given run's page (thread-safe, batched).</summary>
+    /// <remarks>Lines are enqueued lock-free and flushed on a 100ms UI timer,
+    /// so heavy progress output (PFSC: ~17k lines for a 1 GB game) cannot
+    /// starve the message pump.</remarks>
     public void AppendLine(TabPage page, string text)
     {
+        _pending.Enqueue((page, text));
+    }
+
+    /// <summary>Drains the batched output queue on the UI thread.</summary>
+    private void FlushPending()
+    {
+        if (_pending.IsEmpty) return;
         if (!IsHandleCreated) return;
-        if (InvokeRequired)
+
+        // Group lines by page so each TextBox gets one append + one scroll.
+        var byPage = new Dictionary<TabPage, StringBuilder>();
+        while (_pending.TryDequeue(out var item))
         {
-            BeginInvoke(() => AppendLine(page, text));
-            return;
+            if (!byPage.TryGetValue(item.Page, out var sb))
+            {
+                sb = new StringBuilder();
+                byPage[item.Page] = sb;
+            }
+            sb.AppendLine(item.Text);
         }
-        var box = GetBox(page);
-        if (box == null) return;
-        box.AppendText(text + Environment.NewLine);
-        box.SelectionStart = box.TextLength;
-        box.ScrollToCaret();
+
+        foreach (var (page, sb) in byPage)
+        {
+            var box = GetBox(page);
+            if (box == null) continue;
+
+            // Trim the head when the buffer is too large, keeping recent output.
+            if (box.TextLength > MaxTextChars)
+            {
+                int keepFrom = box.TextLength - TrimKeepChars;
+                // Advance to the next newline so we don't split a line.
+                int nl = box.Text.IndexOf('\n', keepFrom);
+                if (nl >= 0) keepFrom = nl + 1;
+                box.Text = box.Text[keepFrom..];
+            }
+
+            box.AppendText(sb.ToString());
+            box.SelectionStart = box.TextLength;
+            box.ScrollToCaret();
+        }
     }
 
     /// <summary>Marks the run finished: ✓/✗ in the tab title + exit line.</summary>
@@ -164,6 +224,7 @@ public sealed class OutputConsole : UserControl
         AppendLine(page, success
             ? $"=== EXIT 0 in {seconds:F1}s ==="
             : $"=== FAILED (exit != 0) in {seconds:F1}s ===");
+        FlushPending(); // immediate flush so the final status is visible
     }
 
     /// <summary>Marks the run cancelled.</summary>
@@ -181,6 +242,7 @@ public sealed class OutputConsole : UserControl
             : "✗ " + page.Text;
         AppendLine(page, "");
         AppendLine(page, "=== CANCELLED ===");
+        FlushPending();
     }
 
     /// <summary>Reports an infrastructure error (process failed to start, etc.).</summary>
@@ -198,6 +260,7 @@ public sealed class OutputConsole : UserControl
             : "✗ " + page.Text;
         AppendLine(page, "");
         AppendLine(page, $"=== ERROR: {message} ===");
+        FlushPending();
     }
 
     public void ClearAll()

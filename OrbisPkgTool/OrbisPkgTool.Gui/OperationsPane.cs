@@ -165,7 +165,6 @@ public sealed class OperationsPane : UserControl
         _fieldsPanel.Controls.Clear();
         _fieldControls.Clear();
 
-        // Add rows in reverse order so Dock=Top stacks them top→bottom.
         var rows = new List<Control>();
 
         if (cmd.Fields.Length == 0)
@@ -175,8 +174,8 @@ public sealed class OperationsPane : UserControl
             {
                 Text = "This operation has no extra options.\n" +
                        (cmd.Group == "Inspect" || cmd.Group == "Diagnose" || cmd.Group == "Extract"
-                           ? "It uses the PKG and passcode from the package bar."
-                           : "Click Run to execute."),
+                            ? "It uses the PKG and passcode from the package bar."
+                            : "Click Run to execute."),
                 AutoSize = true,
                 Padding = new Padding(4, 8, 4, 4),
                 ForeColor = Color.Gray,
@@ -187,25 +186,30 @@ public sealed class OperationsPane : UserControl
 
         foreach (var f in cmd.Fields)
         {
-            // One row panel, Dock=Top, fixed height, label left + input fill.
-            var row = new Panel
+            // One row as a TableLayoutPanel: 2 columns (label | input).
+            // This fixes the vertical alignment between labels and inputs
+            // that the old Panel+Dock=Left approach got wrong.
+            var row = new TableLayoutPanel
             {
                 Dock = DockStyle.Top,
                 Height = 30,
-                Padding = new Padding(2, 2, 2, 2),
+                ColumnCount = 2,
+                RowCount = 1,
                 Margin = new Padding(4, 2, 4, 2),
             };
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
+            // Label in column 0 (left).
             var label = new Label
             {
                 Text = f.Label,
-                AutoSize = false,
-                Width = 190,
-                Dock = DockStyle.Left,
+                Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Padding = new Padding(0, 0, 8, 0),
             };
 
+            // Input control built in column 1 (right).
             Control input;
             switch (f.Kind)
             {
@@ -224,25 +228,48 @@ public sealed class OperationsPane : UserControl
                         DropDownStyle = ComboBoxStyle.DropDownList,
                         Width = 420,
                     };
-                    combo.Items.AddRange(f.Choices);
+                    if (f.ChoiceRemarks is { Length: > 0 } remarks)
+                    {
+                        // Inline remark format: show "value — remark" in the dropdown.
+                        for (int i = 0; i < f.Choices.Length; i++)
+                        {
+                            string val = f.Choices[i];
+                            string rem = i < remarks.Length ? remarks[i] : "";
+                            combo.Items.Add(rem.Length > 0 ? $"{val} — {rem}" : val);
+                        }
+                    }
+                    else
+                    {
+                        combo.Items.AddRange(f.Choices);
+                    }
                     if (combo.Items.Count > 0)
                         combo.SelectedIndex = Math.Max(0, Array.IndexOf(f.Choices, f.Default));
                     input = combo;
                     break;
                 case FieldKind.Check:
-                    input = new CheckBox { Text = "", AutoSize = true, Checked = f.Default == "1" };
+                    // Hint-as-label: a single CheckBox whose Text is the hint.
+                    var cb = new CheckBox
+                    {
+                        Text = f.Hint.Length > 0 ? f.Hint : "",
+                        AutoSize = true,
+                        Checked = f.Default == "1",
+                        CheckAlign = ContentAlignment.MiddleLeft,
+                    };
+                    input = cb;
                     break;
                 default:
                     var box = new TextBox { Width = 420, Text = f.Default };
+                    if (f.Hint.Length > 0 && f.Default.Length == 0)
+                        box.PlaceholderText = f.Hint;
                     input = box;
                     break;
             }
 
-            input.Dock = DockStyle.None;  // restore — file/folder rows are TLPs that manage their own layout
+            input.Dock = DockStyle.Fill;
             _fieldControls[f.Id] = input;
 
-            row.Controls.Add(input);
-            row.Controls.Add(label);
+            row.Controls.Add(label, 0, 0);
+            row.Controls.Add(input, 1, 0);
             rows.Add(row);
         }
 
@@ -255,16 +282,21 @@ public sealed class OperationsPane : UserControl
 
     private Control MakeFileRow(CommandField f, bool open)
     {
-        // Panel: [textbox fill] [browse btn]
-        var panel = new Panel
+        // TableLayoutPanel: [textbox fill] [browse btn]
+        var tlp = new TableLayoutPanel
         {
-            Width = 420,
             Height = 23,
+            ColumnCount = 2,
+            RowCount = 1,
             Margin = new Padding(0),
         };
+        tlp.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        tlp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
 
         var box = new TextBox { Text = f.Default, Dock = DockStyle.Fill };
-        var btn = new Button { Text = "...", Dock = DockStyle.Right, Width = 28 };
+        if (f.Hint.Length > 0 && f.Default.Length == 0)
+            box.PlaceholderText = f.Hint;
+        var btn = new Button { Text = "...", Dock = DockStyle.Fill, Width = 28 };
         btn.Click += (_, _) =>
         {
             if (open)
@@ -278,31 +310,36 @@ public sealed class OperationsPane : UserControl
                 if (dlg.ShowDialog(FindForm()) == DialogResult.OK) box.Text = dlg.FileName;
             }
         };
-        panel.Controls.Add(box);
-        panel.Controls.Add(btn);
-        // z-order: btn added second → docks right first, box fills rest
-        return panel;
+        // z-order: add btn first (column 1, docks/fills right), box second (column 0, fills rest).
+        tlp.Controls.Add(btn, 1, 0);
+        tlp.Controls.Add(box, 0, 0);
+        return tlp;
     }
 
     private Control MakeFolderRow(CommandField f)
     {
-        var panel = new Panel
+        var tlp = new TableLayoutPanel
         {
-            Width = 420,
             Height = 23,
+            ColumnCount = 2,
+            RowCount = 1,
             Margin = new Padding(0),
         };
+        tlp.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        tlp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
 
         var box = new TextBox { Text = f.Default, Dock = DockStyle.Fill };
-        var btn = new Button { Text = "...", Dock = DockStyle.Right, Width = 28 };
+        if (f.Hint.Length > 0 && f.Default.Length == 0)
+            box.PlaceholderText = f.Hint;
+        var btn = new Button { Text = "...", Dock = DockStyle.Fill, Width = 28 };
         btn.Click += (_, _) =>
         {
             using var dlg = new FolderBrowserDialog { Description = f.Label, UseDescriptionForTitle = true };
             if (dlg.ShowDialog(FindForm()) == DialogResult.OK) box.Text = dlg.SelectedPath;
         };
-        panel.Controls.Add(box);
-        panel.Controls.Add(btn);
-        return panel;
+        tlp.Controls.Add(btn, 1, 0);
+        tlp.Controls.Add(box, 0, 0);
+        return tlp;
     }
 
     // ------------------------------------------------------------------
@@ -318,9 +355,9 @@ public sealed class OperationsPane : UserControl
             values[kv.Key] = kv.Value switch
             {
                 TextBox t => t.Text.Trim(),
-                ComboBox c => c.SelectedItem?.ToString() ?? "",
+                ComboBox c => ExtractComboValue(c.SelectedItem?.ToString() ?? ""),
                 CheckBox ck => ck.Checked ? "1" : "0",
-                TableLayoutPanel tp => GetTextBoxOfFileRow(tp)?.Text.Trim() ?? "",
+                TableLayoutPanel tp => GetTextBoxOfRow(tp)?.Text.Trim() ?? "",
                 _ => "",
             };
         }
@@ -328,9 +365,20 @@ public sealed class OperationsPane : UserControl
         RunRequested?.Invoke(_current, values);
     }
 
-    private static TextBox? GetTextBoxOfFileRow(TableLayoutPanel panel)
+    /// <summary>
+    /// Extracts the bare value from a combo item that may be formatted as
+    /// "value — remark". Returns the full string when no separator is found.
+    /// </summary>
+    private static string ExtractComboValue(string display)
     {
-        if (panel.Controls.Count > 0 && panel.Controls[0] is TextBox tb) return tb;
+        int sep = display.IndexOf(" — ");
+        return sep > 0 ? display[..sep] : display;
+    }
+
+    private static TextBox? GetTextBoxOfRow(TableLayoutPanel panel)
+    {
+        foreach (Control c in panel.Controls)
+            if (c is TextBox tb) return tb;
         return null;
     }
 
