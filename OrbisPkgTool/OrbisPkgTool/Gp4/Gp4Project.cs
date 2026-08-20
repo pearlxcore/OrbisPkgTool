@@ -154,7 +154,9 @@ public sealed class Gp4Project
                             new XElement("scenario",
                                 new XAttribute("id", "0"),
                                 new XAttribute("type", "sp"),
-                                new XAttribute("initial_chunk_count", "1"))))),
+                                new XAttribute("initial_chunk_count", "1"),
+                                new XAttribute("label", "Scenario #0"),
+                                "0")))),
                 new XElement("files",
                     Files.Select(f =>
                     {
