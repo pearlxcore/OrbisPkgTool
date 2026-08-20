@@ -332,6 +332,86 @@ public class CompatibilityRegressionTests : IDisposable
         Assert.Equal(mem.Length, streamed.Length);
     }
 
+    // ── 10c. Parallel PFSC workers produce byte-identical output ──
+
+    [Fact]
+    public void PfscParallel_WorkersMatchesSerial_ByteIdentical()
+    {
+        // Parallel PFSC compression must produce byte-identical output to the
+        // serial path (deflate is deterministic; blocks are independent and
+        // written in order). Tests both the memory builder and the streaming
+        // builder with workers > 1.
+        var pfs = Data(5 * 65536 + 7777, 0x55);
+        // Mix in a compressible region to exercise both code paths.
+        Array.Fill(pfs, (byte)0x00, 2 * 65536, 65536);
+
+        // Memory builder: serial vs parallel.
+        var serialMem = OrbisPkgTool.Pfs.PFSCWriter.Build(pfs, storeAllRaw: false, workers: 1);
+        var parMem = OrbisPkgTool.Pfs.PFSCWriter.Build(pfs, storeAllRaw: false, workers: 4);
+        Assert.Equal(Sha(serialMem), Sha(parMem));
+
+        // Streaming builder: serial vs parallel.
+        byte[] serialStreamed;
+        using (var ms = new MemoryStream())
+        {
+            using var inMs = new MemoryStream(pfs);
+            OrbisPkgTool.Pfs.PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: false, workers: 1);
+            serialStreamed = ms.ToArray();
+        }
+        byte[] parStreamed;
+        using (var ms = new MemoryStream())
+        {
+            using var inMs = new MemoryStream(pfs);
+            OrbisPkgTool.Pfs.PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: false, workers: 4);
+            parStreamed = ms.ToArray();
+        }
+        Assert.Equal(Sha(serialStreamed), Sha(parStreamed));
+        // Cross-check: memory builder and stream builder agree too.
+        Assert.Equal(Sha(serialMem), Sha(serialStreamed));
+        Assert.Equal(Sha(parMem), Sha(parStreamed));
+    }
+
+    [Fact]
+    public void PfscParallel_WorkersZero_MatchesSerial()
+    {
+        // workers=0 means "all cores" — still byte-identical.
+        var pfs = Data(3 * 65536, 0x61);
+        var serial = OrbisPkgTool.Pfs.PFSCWriter.Build(pfs, storeAllRaw: false, workers: 1);
+        var parallel = OrbisPkgTool.Pfs.PFSCWriter.Build(pfs, storeAllRaw: false, workers: 0);
+        Assert.Equal(Sha(serial), Sha(parallel));
+    }
+
+    [Fact]
+    public void PfscParallel_UnalignedTail_MatchesSerialAndMemory()
+    {
+        // A non-block-aligned image whose incompressible tail hits the raw
+        // fallback: memory builder zero-pads the tail; both streaming paths
+        // (serial and parallel) must produce the exact same bytes.
+        // (Real PFS images are block-aligned, but the writers must be
+        // self-consistent for any input length.)
+        var rnd = new Random(4242);
+        var pfs = new byte[2 * 65536 + 30000]; // tail block only 30000 bytes
+        rnd.NextBytes(pfs); // fully incompressible → last block raw
+
+        var mem = OrbisPkgTool.Pfs.PFSCWriter.Build(pfs, storeAllRaw: false, workers: 1);
+        byte[] serial;
+        using (var ms = new MemoryStream())
+        {
+            using var inMs = new MemoryStream(pfs);
+            OrbisPkgTool.Pfs.PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: false, workers: 1);
+            serial = ms.ToArray();
+        }
+        byte[] parallel;
+        using (var ms = new MemoryStream())
+        {
+            using var inMs = new MemoryStream(pfs);
+            OrbisPkgTool.Pfs.PFSCWriter.BuildToStream(inMs, ms, storeAllRaw: false, workers: 4);
+            parallel = ms.ToArray();
+        }
+        Assert.Equal(Sha(mem), Sha(serial));
+        Assert.Equal(Sha(mem), Sha(parallel));
+    }
+
     [Fact]
     public void PfscStreaming_Raw_MatchesMemoryBuilder_ByteIdentical()
     {

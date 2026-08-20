@@ -62,7 +62,6 @@ public static class PfscDeflate
     private static DeflateInit2? _deflateInit2;
     private static Deflate? _deflate;
     private static DeflateEnd? _deflateEnd;
-    private static readonly object _gate = new();
 
     /// <summary>True when zlib1.dll was found and its exports resolved.</summary>
     public static bool IsAvailable => _loaded.Value;
@@ -110,34 +109,34 @@ public static class PfscDeflate
             return -1;
         if (offset < 0 || count < 0 || offset + count > input.Length)
             throw new ArgumentOutOfRangeException(nameof(offset));
-        lock (_gate) // zlib deflate is per-stream safe; serialize to be defensive
+        // Each call creates its own z_stream — no shared mutable state — so
+        // concurrent calls are safe without a lock. The function pointers
+        // (_deflateInit2, _deflate, _deflateEnd) are immutable after Load().
+        var z = new ZStream();
+        // zlib only compares the major version char and sizeof(z_stream).
+        if (_deflateInit2(ref z, PfsFormat.PfscDeflateLevel, ZDeflated, -12, 8, 0,
+                "1.2.13", Marshal.SizeOf<ZStream>()) != ZOk)
+            return -1;
+        var inPin = GCHandle.Alloc(input, GCHandleType.Pinned);
+        var outPin = GCHandle.Alloc(output, GCHandleType.Pinned);
+        try
         {
-            var z = new ZStream();
-            // zlib only compares the major version char and sizeof(z_stream).
-            if (_deflateInit2(ref z, PfsFormat.PfscDeflateLevel, ZDeflated, -12, 8, 0,
-                    "1.2.13", Marshal.SizeOf<ZStream>()) != ZOk)
-                return -1;
-            var inPin = GCHandle.Alloc(input, GCHandleType.Pinned);
-            var outPin = GCHandle.Alloc(output, GCHandleType.Pinned);
-            try
-            {
-                z.next_in = IntPtr.Add(inPin.AddrOfPinnedObject(), offset);
-                z.avail_in = (uint)count;
-                z.next_out = outPin.AddrOfPinnedObject();
-                z.avail_out = (uint)output.Length;
-                int rc = _deflate(ref z, ZFinish);
-                while (rc == ZOk && z.avail_out > 0)
-                    rc = _deflate(ref z, ZFinish);
-                if (rc != ZStreamEnd)
-                    return -1; // ran out of output — treat as incompressible
-                return (int)z.total_out;
-            }
-            finally
-            {
-                outPin.Free();
-                inPin.Free();
-                _deflateEnd(ref z);
-            }
+            z.next_in = IntPtr.Add(inPin.AddrOfPinnedObject(), offset);
+            z.avail_in = (uint)count;
+            z.next_out = outPin.AddrOfPinnedObject();
+            z.avail_out = (uint)output.Length;
+            int rc = _deflate(ref z, ZFinish);
+            while (rc == ZOk && z.avail_out > 0)
+                rc = _deflate(ref z, ZFinish);
+            if (rc != ZStreamEnd)
+                return -1; // ran out of output — treat as incompressible
+            return (int)z.total_out;
+        }
+        finally
+        {
+            outPin.Free();
+            inPin.Free();
+            _deflateEnd(ref z);
         }
     }
 }

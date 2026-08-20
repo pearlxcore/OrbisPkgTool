@@ -851,7 +851,7 @@ static void RunRestructure(string[] args)
 /// Usage:
 ///   repack &lt;input.pkg&gt; [--out &lt;output.pkg&gt;] [--passcode X]
 ///          [--validate] [--pfsc-mode compressed|store]
-///          [--title "Name"] [--title-id CUSA00001]
+///          [--workers N] [--title "Name"] [--title-id CUSA00001]
 ///          [--work-dir &lt;dir&gt;]
 ///
 /// The default --pfsc-mode compressed replays the ORIGINAL package's
@@ -865,6 +865,7 @@ static void RunRepack(string[] args)
     string? workDir = null;
     bool validate = false;
     string pfscMode = "compressed";
+    int workers = 1;
 
     for (int i = 0; i < args.Length; i++)
     {
@@ -877,6 +878,8 @@ static void RunRepack(string[] args)
             case "--content-id" when i + 1 < args.Length: contentId  = args[++i]; break;
             case "--pfsc-mode" when i + 1 < args.Length: pfscMode   = args[++i]; break;
             case "--work-dir"  when i + 1 < args.Length: workDir    = args[++i]; break;
+            case "--workers" when i + 1 < args.Length && int.TryParse(args[i + 1], out int w) && w >= 0:
+                workers = w; ++i; break;
             case "--validate": validate = true; break;
             default:
                 if (!args[i].StartsWith('-')) pkg = args[i];
@@ -888,7 +891,7 @@ static void RunRepack(string[] args)
     {
         Console.Error.WriteLine("usage: repack <input.pkg> [--out <output.pkg>] [--passcode X]");
         Console.Error.WriteLine("              [--validate] [--pfsc-mode compressed|store]");
-        Console.Error.WriteLine("              [--title \"Name\"] [--title-id CUSA00001]");
+        Console.Error.WriteLine("              [--workers N] [--title \"Name\"] [--title-id CUSA00001]");
         Console.Error.WriteLine("              [--work-dir <dir>]");
         Console.Error.WriteLine();
         Console.Error.WriteLine("  Full extract→restructure→gp4gen→build in one command.");
@@ -1049,6 +1052,7 @@ static void RunRepack(string[] args)
         Console.WriteLine("[4/5] Building PKG (pure C#)...");
         var buildArgs = new List<string> { gp4Path, image0Dir, "--out", outFile, "--passcode", passcode };
         if (pfscMode != "store") { buildArgs.Add("--pfsc-mode"); buildArgs.Add(pfscMode); }
+        if (workers != 1)        { buildArgs.Add("--workers");    buildArgs.Add(workers.ToString()); }
         if (origContentType != 0)  { buildArgs.Add("--content-type"); buildArgs.Add($"0x{origContentType:X}"); }
         if (origContentFlags != 0) { buildArgs.Add("--content-flags"); buildArgs.Add($"0x{origContentFlags:X}"); }
         RunPkgBuild(buildArgs.ToArray());
@@ -1523,6 +1527,7 @@ static void RunPkgBuild(string[] args)
     bool validate = false;
     string pfscMode = "compressed";
     string? manifest = null;
+    int workers = 1;
     uint? contentTypeOverride = null, contentFlagsOverride = null;
     for (int i = 0; i < args.Length; i++)
     {
@@ -1533,6 +1538,8 @@ static void RunPkgBuild(string[] args)
             case "--validate": validate = true; break;
             case "--pfsc-mode" when i + 1 < args.Length: pfscMode = args[++i]; break;
             case "--manifest" when i + 1 < args.Length: manifest = args[++i]; break;
+            case "--workers" when i + 1 < args.Length && int.TryParse(args[i + 1], out int w) && w >= 0:
+                workers = w; ++i; break;
             case "--content-type" when i + 1 < args.Length:
                 contentTypeOverride = ParseHexU32(args[++i]); break;
             case "--content-flags" when i + 1 < args.Length:
@@ -1550,6 +1557,8 @@ static void RunPkgBuild(string[] args)
     {
         Console.Error.WriteLine("usage: pkg build <project.gp4> <source_folder> [--passcode X] [--out file.pkg]");
         Console.Error.WriteLine("       [--pfsc-mode compressed|store] [--manifest file.json] [--validate]");
+        Console.Error.WriteLine("       [--workers N]  (N=1 serial default, 0=all cores; parallel PFSC compression,");
+        Console.Error.WriteLine("                      byte-identical output)");
         Environment.ExitCode = 2;
         return;
     }
@@ -1569,6 +1578,7 @@ static void RunPkgBuild(string[] args)
             ContentFlagsOverride = contentFlagsOverride,
             Validate = validate,
             ManifestPath = manifest,
+            Workers = workers,
             CancellationToken = cts.Token,
             Progress = (stage, done, total) =>
             {

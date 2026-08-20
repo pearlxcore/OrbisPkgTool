@@ -70,6 +70,15 @@ public sealed class BuildOptions
     /// <summary>Progress callback: (stage, bytes done, bytes total). long-based.</summary>
     public Action<BuildStage, long, long>? Progress { get; set; }
 
+    /// <summary>
+    /// Number of worker threads for parallelizable build stages (currently:
+    /// PFSC compression). Default 1 = fully serial (the proven path). 0 =
+    /// Environment.ProcessorCount. Values >1 compress PFSC blocks concurrently
+    /// with bounded memory; output is byte-identical to the serial path
+    /// (deflate is deterministic and blocks are written in order).
+    /// </summary>
+    public int Workers { get; set; } = 1;
+
     /// <summary>Cancellation token — abort mid-build with clean temp cleanup.</summary>
     public System.Threading.CancellationToken CancellationToken { get; set; }
 }

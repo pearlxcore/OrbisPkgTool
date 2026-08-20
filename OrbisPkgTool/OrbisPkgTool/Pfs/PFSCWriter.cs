@@ -63,7 +63,7 @@ public static class PFSCWriter
     /// <summary>Stream-based PFSC build for images that don't fit in memory.</summary>
     public static void BuildToStream(Stream pfsImage, Stream output, bool storeAllRaw = true,
         System.Threading.CancellationToken ct = default, Action<long, long>? progress = null,
-        RawBlockSet? rawBlocks = null)
+        RawBlockSet? rawBlocks = null, int workers = 1)
     {
         const int blockSize = (int)PfsFormat.BlockSize;
         long total = pfsImage.Length;
@@ -119,10 +119,89 @@ public static class PFSCWriter
 
         {
             var table = new ulong[blockCount + 1];
-            var raw = new byte[blockSize];
             long dataPos = dataOffset;
             table[0] = (ulong)dataPos;
             output.Position = dataOffset;
+
+            // workers <= 0 means "one per core" (normalized here so library
+            // callers can pass 0); 1 keeps the proven serial path.
+            int effectiveWorkers = workers <= 0 ? Environment.ProcessorCount : workers;
+
+            if (effectiveWorkers > 1 && !storeAllRaw && blockCount > 0)
+            {
+                // Parallel path: identical bytes, bounded memory. The image is
+                // processed in fixed-size chunks: read the chunk sequentially,
+                // compress its blocks concurrently (each worker slices the
+                // shared chunk buffer — CompressBlock takes an offset), then
+                // write the chunk's blocks in order. Peak memory stays at
+                // ~chunk bytes + compressed results no matter the image size.
+                const int chunkBlocks = 256; // 256 × 64 KiB = 16 MiB
+                var parallelOptions = new System.Threading.Tasks.ParallelOptions
+                {
+                    MaxDegreeOfParallelism = effectiveWorkers,
+                    CancellationToken = ct,
+                };
+                var chunkBuf = new byte[Math.Min(chunkBlocks, blockCount) * blockSize];
+                byte[]?[] results = new byte[chunkBlocks][];
+                for (int chunkStart = 0; chunkStart < blockCount; chunkStart += chunkBlocks)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    int chunkCount = Math.Min(chunkBlocks, blockCount - chunkStart);
+                    int chunkBytes = (int)Math.Min((long)chunkCount * blockSize,
+                        total - (long)chunkStart * blockSize);
+                    pfsImage.Position = (long)chunkStart * blockSize;
+                    pfsImage.ReadExactly(chunkBuf, 0, chunkBytes);
+                    // Non-aligned images (never produced by the PFS writer, but
+                    // accepted here): the raw-fallback tail beyond chunkBytes
+                    // must be zeros like the memory builder, not stale bytes
+                    // from the previous chunk.
+                    int chunkCapacity = chunkCount * blockSize;
+                    if (chunkBytes < chunkCapacity)
+                        Array.Clear(chunkBuf, chunkBytes, chunkCapacity - chunkBytes);
+                    System.Threading.Tasks.Parallel.For(0, chunkCount, parallelOptions, j =>
+                    {
+                        results[j] = null; // null = store raw (slice of chunkBuf)
+                        bool forceRaw = rawBlocks?.Contains(chunkStart + j) ?? false;
+                        if (!forceRaw)
+                        {
+                            int len = (int)Math.Min((long)blockSize,
+                                total - (long)(chunkStart + j) * blockSize);
+                            results[j] = CompressBlock(chunkBuf, j * blockSize, len);
+                        }
+                    });
+                    // Sequential write — byte-for-byte the serial path's layout.
+                    for (int j = 0; j < chunkCount; j++)
+                    {
+                        var comp = results[j];
+                        if (comp != null)
+                        {
+                            output.Write(comp, 0, comp.Length);
+                            dataPos += comp.Length;
+                        }
+                        else
+                        {
+                            // Raw fallback: full blockSize always (the PFS image
+                            // is block-aligned, so the last block is exactly
+                            // blockSize too).
+                            output.Write(chunkBuf, j * blockSize, blockSize);
+                            dataPos += blockSize;
+                        }
+                        table[chunkStart + j + 1] = (ulong)dataPos;
+                        results[j] = null; // release before the next chunk fills it
+                        progress?.Invoke(dataPos - dataOffset, total);
+                    }
+                }
+                // Table (entry 0 = dataOffset, then each block's end offset).
+                for (int i = 0; i <= blockCount; i++)
+                {
+                    output.Position = tableOffset + i * 8;
+                    WriteLe(output, table[i]);
+                }
+                return;
+            }
+
+            // Serial path (workers == 1, storeAllRaw, or empty image).
+            var raw = new byte[blockSize];
             for (int i = 0; i < blockCount; i++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -130,6 +209,11 @@ public static class PFSCWriter
                 long remain = total - (long)i * blockSize;
                 int len = (int)Math.Min((long)blockSize, remain);
                 pfsImage.ReadExactly(raw, 0, len);
+                // Non-aligned images (never produced by the PFS writer): the
+                // raw-fallback tail beyond len must be zeros like the memory
+                // builder, not stale bytes from the previous block.
+                if (len < blockSize)
+                    Array.Clear(raw, len, blockSize - len);
                 bool forceRaw = rawBlocks?.Contains(i) ?? false;
                 if (!forceRaw)
                 {
@@ -167,7 +251,8 @@ public static class PFSCWriter
             (byte)(v >> 32), (byte)(v >> 40), (byte)(v >> 48), (byte)(v >> 56),
         }, 0, 8);
 
-    public static byte[] Build(byte[] pfsImage, bool storeAllRaw = false, RawBlockSet? rawBlocks = null)
+    public static byte[] Build(byte[] pfsImage, bool storeAllRaw = false, RawBlockSet? rawBlocks = null,
+        int workers = 1)
     {
         const int blockSize = (int)PfsFormat.BlockSize;
         int blockCount = (pfsImage.Length + blockSize - 1) / blockSize;
@@ -178,7 +263,36 @@ public static class PFSCWriter
         long dataOffset = ((tableOffset + (blockCount + 1) * (long)PfsFormat.PfscTableEntrySize + PfsFormat.BlockSize - 1)
             / PfsFormat.BlockSize) * PfsFormat.BlockSize;
         var compressedBlocks = new byte[blockCount][];
-        long dataSize = 0;
+        int effectiveWorkers = workers <= 0 ? Environment.ProcessorCount : workers;
+
+        if (effectiveWorkers > 1 && !storeAllRaw && blockCount > 0)
+        {
+            var parallelOptions = new System.Threading.Tasks.ParallelOptions
+            {
+                MaxDegreeOfParallelism = effectiveWorkers,
+            };
+            System.Threading.Tasks.Parallel.For(0, blockCount, parallelOptions, i =>
+            {
+                int len = Math.Min(blockSize, pfsImage.Length - i * blockSize);
+                bool forceRaw = rawBlocks?.Contains(i) ?? false;
+                if (forceRaw)
+                {
+                    compressedBlocks[i] = new byte[blockSize];
+                    Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
+                    return;
+                }
+                var comp = CompressBlock(pfsImage, i * blockSize, len);
+                if (comp != null)
+                    compressedBlocks[i] = comp;
+                else
+                {
+                    compressedBlocks[i] = new byte[blockSize];
+                    Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
+                }
+            });
+        }
+        else
+        {
         for (int i = 0; i < blockCount; i++)
         {
             int len = Math.Min(blockSize, pfsImage.Length - i * blockSize);
@@ -187,7 +301,6 @@ public static class PFSCWriter
                 // Diagnostic: store every block raw (no compression).
                 compressedBlocks[i] = new byte[blockSize];
                 Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
-                dataSize += compressedBlocks[i].Length;
                 continue;
             }
             // Per-file policy: blocks belonging to "disable" files are stored
@@ -198,7 +311,6 @@ public static class PFSCWriter
             {
                 compressedBlocks[i] = new byte[blockSize];
                 Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
-                dataSize += compressedBlocks[i].Length;
                 continue;
             }
             // Complete zlib stream: 0x48 0x89 header + raw deflate +
@@ -215,7 +327,7 @@ public static class PFSCWriter
                 compressedBlocks[i] = new byte[blockSize];
                 Buffer.BlockCopy(pfsImage, i * blockSize, compressedBlocks[i], 0, len);
             }
-            dataSize += compressedBlocks[i].Length;
+        }
         }
         using var ms = new MemoryStream();
         var w = new BinaryWriter(ms);

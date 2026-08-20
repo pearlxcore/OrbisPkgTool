@@ -139,7 +139,8 @@ public static class PkgBuilder
         var rawBlocks = BuildPolicyRawBlocks(innerAlloc, project, options, out int disabledCount);
         var pfsc = PFSCWriter.Build(inner,
             storeAllRaw: options.PfscMode != PfscMode.Compressed,
-            rawBlocks: options.PfscMode == PfscMode.Compressed ? rawBlocks : null);
+            rawBlocks: options.PfscMode == PfscMode.Compressed ? rawBlocks : null,
+            workers: options.Workers);
         if (disabledCount > 0 && !options.Quiet)
             Console.Error.WriteLine($"[pfsc] {disabledCount} file(s) stored raw (pfs_compression=disable)");
         var outer = PfsWriter.BuildOuterPfs(pfsc, "pfs_image.dat", dk[1], Keys.FakeKeySeed, 0, out long outerDataStartMem);
@@ -285,7 +286,8 @@ public static class PkgBuilder
                 PFSCWriter.BuildToStream(innerIn, pfscFs,
                     storeAllRaw: options.PfscMode != PfscMode.Compressed, ct,
                     (done, total) => options.Progress?.Invoke(BuildStage.Pfsc, done, total),
-                    rawBlocks: options.PfscMode == PfscMode.Compressed ? rawBlocks : null);
+                    rawBlocks: options.PfscMode == PfscMode.Compressed ? rawBlocks : null,
+                    workers: options.Workers);
 
             // 3. Outer PFS → file (signing + XTS)
             long outerDataStart = 0;
