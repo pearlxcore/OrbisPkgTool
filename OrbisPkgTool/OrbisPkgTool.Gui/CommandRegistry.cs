@@ -3,38 +3,43 @@ namespace OrbisPkgTool.Gui;
 /// <summary>
 /// Complete registry of every OrbisPkgTool CLI command, with the exact
 /// option surface of each. Built from the CLI's Program.cs dispatch table.
+///
+/// Split into two lists for the two-tab GUI workflow:
+///   - <see cref="PackageOps"/>: 21 PKG-centric operations (pkg + passcode are
+///     supplied by the Package bar, NOT listed as fields — the GUI injects
+///     them at run time).
+///   - <see cref="ToolOps"/>: 19 self-contained non-PKG operations (build,
+///     SFO/TRP, standalone tools).
 /// </summary>
 public static class CommandRegistry
 {
-    public static IReadOnlyList<CommandDef> All { get; } = Build();
+    public static IReadOnlyList<CommandDef> PackageOps { get; } = BuildPackageOps();
+    public static IReadOnlyList<CommandDef> ToolOps { get; } = BuildToolOps();
 
-    static string V(string v) => v;
+    // Aggregate kept for any legacy code that still iterates everything.
+    public static IReadOnlyList<CommandDef> All =>
+        [.. PackageOps, .. ToolOps];
 
-    static CommandField Pkg(string id = "pkg") => new()
-    {
-        Id = id, Label = "Package (.pkg)", Kind = FieldKind.File,
-        Filter = "PS4 Packages (*.pkg)|*.pkg|All files (*.*)|*.*", Position = 0,
-    };
-    static CommandField Passcode(string def = CommandDef.DefaultPasscode) => new()
-    {
-        Id = "passcode", Label = "Passcode (32 hex)", Kind = FieldKind.Text, Default = def,
-    };
     static CommandField Out() => new()
     {
         Id = "out", Label = "Output path", Kind = FieldKind.SaveFile, Filter = "All files (*.*)|*.*",
     };
 
-    static List<CommandDef> Build()
+    // ==================================================================
+    // Package ops: 21 — pkg/passcode injected by PackageBar at run time,
+    // so the per-op Fields never list them.
+    // ==================================================================
+    static List<CommandDef> BuildPackageOps()
     {
         var cmds = new List<CommandDef>();
 
         // ---------------------------------------------------------- list
         cmds.Add(new CommandDef
         {
-            Name = "list", Group = "Read", Title = "List files in a PKG",
+            Name = "list", Group = "Inspect", Title = "List files in a PKG",
             Description = "List all files and directories in a PKG (orbis img_file_list equivalent).",
             CliWord = "list",
-            Fields = [Pkg(), Passcode(), new CommandField
+            Fields = [new CommandField
             {
                 Id = "oformat", Label = "Output format", Kind = FieldKind.Combo,
                 Choices = ["short", "long+original_size", "packed_size"],
@@ -49,22 +54,98 @@ public static class CommandRegistry
             },
         });
 
+        // ---------------------------------------------------------- info
+        cmds.Add(new CommandDef
+        {
+            Name = "info", Group = "Inspect", Title = "Show PKG metadata",
+            Description = "Show PKG metadata (title, content ID, category, version, size).",
+            CliWord = "info",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        // -------------------------------------------------------- verify
+        cmds.Add(new CommandDef
+        {
+            Name = "verify", Group = "Inspect", Title = "Verify PKG hashes/signatures",
+            Description = "Verify all PKG header hashes and signatures (fast, CPU only).",
+            CliWord = "verify",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        // ------------------------------------------------------ validate
+        cmds.Add(new CommandDef
+        {
+            Name = "validate", Group = "Inspect", Title = "Structured 8-stage validation",
+            Description = "Structured 8-stage validation of a PKG (header/entries/outer PFS/PFSC/inner PFS/digests/signatures).",
+            CliWord = "validate",
+            Fields = [],
+            BuildArgs = f =>
+            {
+                var a = new List<string>();
+                if (f["passcode"] is { Length: > 0 } p) { a.Add("--passcode"); a.Add(p); }
+                a.Add(f["pkg"]);
+                return a.ToArray();
+            },
+        });
+
+        // ---------------------------------------------------------- bench
+        cmds.Add(new CommandDef
+        {
+            Name = "bench", Group = "Inspect", Title = "Benchmark listing speed",
+            Description = "Measure entry-table-only listing time (acceptance: <2 s on large PKGs).",
+            CliWord = "bench",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        // ------------------------------------------------------ entries
+        cmds.Add(new CommandDef
+        {
+            Name = "entries", Group = "Inspect", Title = "Dump PKG entry table",
+            Description = "Dump the PKG entry table: id, name, size, offset (diagnostic).",
+            CliWord = "entries",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        // ------------------------------------------------------- inspect
+        cmds.Add(new CommandDef
+        {
+            Name = "inspect", Group = "Inspect", Title = "Full PFS tree dump",
+            Description = "Full PFS tree dump (outer + inner), useful for debugging.",
+            CliWord = "inspect",
+            Fields = [],
+            BuildArgs = f =>
+            {
+                var a = new List<string>();
+                if (f["passcode"] is { Length: > 0 } p) { a.Add("--passcode"); a.Add(p); }
+                a.Add(f["pkg"]);
+                return a.ToArray();
+            },
+        });
+
         // ------------------------------------------------------- extract
         cmds.Add(new CommandDef
         {
-            Name = "extract", Group = "Read", Title = "Extract files from a PKG",
+            Name = "extract", Group = "Extract", Title = "Extract files from a PKG",
             Description = "Extract a PKG (or a single entry like pkg:Sc0/param.sfo) to a folder.",
             CliWord = "extract",
-            Fields = [Pkg(), new CommandField
-            {
-                Id = "entry", Label = "Entry path (optional, pkg:entry)", Kind = FieldKind.Text,
-            }, new CommandField
-            {
-                Id = "outdir", Label = "Output directory", Kind = FieldKind.Folder, Position = 1,
-            }, Passcode(), new CommandField
-            {
-                Id = "verbose", Label = "Verbose per-file progress", Kind = FieldKind.Check,
-            }],
+            Fields = [
+                new CommandField
+                {
+                    Id = "entry", Label = "Entry path (optional, pkg:entry)", Kind = FieldKind.Text,
+                },
+                new CommandField
+                {
+                    Id = "outdir", Label = "Output directory", Kind = FieldKind.Folder, Position = 1,
+                },
+                new CommandField
+                {
+                    Id = "verbose", Label = "Verbose per-file progress", Kind = FieldKind.Check,
+                },
+            ],
             BuildArgs = f =>
             {
                 var a = new List<string>();
@@ -76,87 +157,163 @@ public static class CommandRegistry
             },
         });
 
-        // -------------------------------------------------------- verify
+        // ----------------------------------------------------- dumpinner
         cmds.Add(new CommandDef
         {
-            Name = "verify", Group = "Read", Title = "Verify PKG hashes/signatures",
-            Description = "Verify all PKG header hashes and signatures (fast, CPU only).",
-            CliWord = "verify",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
+            Name = "dumpinner", Group = "Extract", Title = "Extract raw inner PFS",
+            Description = "Extract the raw decompressed inner PFS to a file (streaming, >2GB safe).",
+            CliWord = "dumpinner",
+            Fields = [
+                new CommandField { Id = "out", Label = "Output (.pfs)", Kind = FieldKind.SaveFile,
+                    Filter = "PFS images (*.pfs)|*.pfs|All files (*.*)|*.*", Position = 1 }],
+            BuildArgs = f => [f["pkg"], f["out"]],
         });
 
-        // ---------------------------------------------------------- info
+        // ------------------------------------------------------ dumppfsc
         cmds.Add(new CommandDef
         {
-            Name = "info", Group = "Read", Title = "Show PKG metadata",
-            Description = "Show PKG metadata (title, content ID, category, version, size).",
-            CliWord = "info",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
+            Name = "dumppfsc", Group = "Extract", Title = "Extract raw PFSC container",
+            Description = "Extract the raw PFSC-compressed pfs_image.dat to a file.",
+            CliWord = "dumppfsc",
+            Fields = [
+                new CommandField { Id = "out", Label = "Output (.pfsc)", Kind = FieldKind.SaveFile,
+                    Filter = "PFSC images (*.pfsc)|*.pfsc|All files (*.*)|*.*", Position = 1 }],
+            BuildArgs = f => [f["pkg"], f["out"]],
         });
 
-        // ------------------------------------------------------- inspect
+        // ------------------------------------------------------- xtsdump
         cmds.Add(new CommandDef
         {
-            Name = "inspect", Group = "Read", Title = "Full PFS tree dump",
-            Description = "Full PFS tree dump (outer + inner), useful for debugging.",
-            CliWord = "inspect",
-            Fields = [Pkg(), Passcode()],
+            Name = "xtsdump", Group = "Extract", Title = "Dump XTS-decrypted data",
+            Description = "Decrypt and dump a region of the PKG image (XTS sectors).",
+            CliWord = "xtsdump",
+            Fields = [
+                new CommandField { Id = "out", Label = "Output", Kind = FieldKind.SaveFile, Position = 1 }],
+            BuildArgs = f => [f["pkg"], f["out"]],
+        });
+
+        // ------------------------------------------------------ pfsdump
+        cmds.Add(new CommandDef
+        {
+            Name = "pfsdump", Group = "Diagnose", Title = "Dump outer PFS structure",
+            Description = "Dump the outer PFS structure (headers, inodes, dirents).",
+            CliWord = "pfsdump",
+            Fields = [new CommandField
+            {
+                Id = "saveinner", Label = "Also save inner PFS (out.pfs)", Kind = FieldKind.SaveFile,
+                Filter = "PFS images (*.pfs)|*.pfs|All files (*.*)|*.*",
+            }],
             BuildArgs = f =>
             {
-                var a = new List<string>();
-                if (f["passcode"] is { Length: > 0 } p) { a.Add("--passcode"); a.Add(p); }
-                a.Add(f["pkg"]);
-                return a.ToArray();
+                if (f["saveinner"] is { Length: > 0 } o)
+                    return ["--save-inner", f["pkg"], o];
+                return [f["pkg"]];
             },
         });
 
-        // ------------------------------------------------------ validate
+        // ----------------------------------------------------- signverify
         cmds.Add(new CommandDef
         {
-            Name = "validate", Group = "Read", Title = "Structured 8-stage validation",
-            Description = "Structured 8-stage validation of a PKG (header/entries/outer PFS/PFSC/inner PFS/digests/signatures).",
-            CliWord = "validate",
-            Fields = [Pkg(), Passcode()],
-            BuildArgs = f =>
-            {
-                var a = new List<string>();
-                if (f["passcode"] is { Length: > 0 } p) { a.Add("--passcode"); a.Add(p); }
-                a.Add(f["pkg"]);
-                return a.ToArray();
-            },
-        });
-
-        // -------------------------------------------------------- entries
-        cmds.Add(new CommandDef
-        {
-            Name = "entries", Group = "Read", Title = "Dump PKG entry table",
-            Description = "Dump the PKG entry table: id, name, size, offset (diagnostic).",
-            CliWord = "entries",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
-        });
-
-        // ---------------------------------------------------------- bench
-        cmds.Add(new CommandDef
-        {
-            Name = "bench", Group = "Read", Title = "Benchmark listing speed",
-            Description = "Measure entry-table-only listing time (acceptance: <2 s on large PKGs).",
-            CliWord = "bench",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
-        });
-
-        // ------------------------------------------------------- selftest
-        cmds.Add(new CommandDef
-        {
-            Name = "selftest", Group = "Read", Title = "Validate embedded RSA keys",
-            Description = "Validate the embedded key constants.",
-            CliWord = "selftest",
+            Name = "signverify", Group = "Diagnose", Title = "Verify outer PFS signatures",
+            Description = "Verify the outer PFS HMAC signature slots (diagnostic).",
+            CliWord = "signverify",
             Fields = [],
-            BuildArgs = _ => [],
+            BuildArgs = f => [f["pkg"]],
         });
+
+        // ------------------------------------------------------ innerfpt
+        cmds.Add(new CommandDef
+        {
+            Name = "innerfpt", Group = "Diagnose", Title = "Dump inner PFS flat path table",
+            Description = "Dump the inner PFS flat path table (diagnostic).",
+            CliWord = "innerfpt",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        // ------------------------------------------------------ pfsblock
+        cmds.Add(new CommandDef
+        {
+            Name = "pfsblock", Group = "Diagnose", Title = "Dump a PFS block",
+            Description = "Dump a specific outer PFS block (diagnostic).",
+            CliWord = "pfsblock",
+            Fields = [new CommandField
+            {
+                Id = "block", Label = "Block number", Kind = FieldKind.Text, Position = 1,
+            }],
+            BuildArgs = f => [f["pkg"], f["block"]],
+        });
+
+        // ---------------------------------------------------------- iblock
+        cmds.Add(new CommandDef
+        {
+            Name = "iblock", Group = "Diagnose", Title = "Dump an inner PFS block",
+            Description = "Dump a specific inner PFS block (diagnostic).",
+            CliWord = "iblock",
+            Fields = [new CommandField
+            {
+                Id = "block", Label = "Block number", Kind = FieldKind.Text, Position = 1,
+            }],
+            BuildArgs = f => [f["pkg"], f["block"]],
+        });
+
+        // ------------------------------------------------------- xtstest
+        cmds.Add(new CommandDef
+        {
+            Name = "xtstest", Group = "Diagnose", Title = "XTS encryption test",
+            Description = "XTS sector encrypt/decrypt round-trip test (diagnostic).",
+            CliWord = "xtstest",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        // -------------------------------------------------------- blkcount
+        cmds.Add(new CommandDef
+        {
+            Name = "blkcount", Group = "Diagnose", Title = "Count pfs_image.dat blocks",
+            Description = "Enumerate and count outer-PFS pfs_image.dat blocks (diagnostic).",
+            CliWord = "blkcount",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        // ------------------------------------------------------ resignpfs
+        cmds.Add(new CommandDef
+        {
+            Name = "resignpfs", Group = "Diagnose", Title = "Resign outer PFS",
+            Description = "Recompute and rewrite the outer PFS HMAC signatures in place (diagnostic).",
+            CliWord = "resignpfs",
+            Fields = [new CommandField
+            {
+                Id = "maxblocks", Label = "Max blocks (blank = all)", Kind = FieldKind.Text,
+            }],
+            BuildArgs = f =>
+            {
+                var a = new List<string> { f["pkg"] };
+                if (f["maxblocks"] is { Length: > 0 } m) a.Add(m);
+                return a.ToArray();
+            },
+        });
+
+        // ----------------------------------------------------- fixdigests
+        cmds.Add(new CommandDef
+        {
+            Name = "fixdigests", Group = "Diagnose", Title = "Recompute PKG digests",
+            Description = "Recompute all header digests of an existing PKG in place (diagnostic; keeps orbis format check happy after patching).",
+            CliWord = "fixdigests",
+            Fields = [],
+            BuildArgs = f => [f["pkg"]],
+        });
+
+        return cmds;
+    }
+
+    // ==================================================================
+    // Tool ops: 19 — self-contained (fields include every CLI input).
+    // ==================================================================
+    static List<CommandDef> BuildToolOps()
+    {
+        var cmds = new List<CommandDef>();
 
         // ----------------------------------------------------------- build
         cmds.Add(new CommandDef
@@ -168,7 +325,9 @@ public static class CommandRegistry
                 new CommandField { Id = "gp4", Label = "Project (.gp4)", Kind = FieldKind.File,
                     Filter = "GP4 projects (*.gp4)|*.gp4|All files (*.*)|*.*", Position = 0 },
                 new CommandField { Id = "folder", Label = "Source folder (Image0)", Kind = FieldKind.Folder, Position = 1 },
-                Out(), Passcode(),
+                Out(),
+                new CommandField { Id = "passcode", Label = "Passcode (32 hex)", Kind = FieldKind.Text,
+                    Default = CommandDef.DefaultPasscode },
                 new CommandField { Id = "pfsc", Label = "PFSC mode", Kind = FieldKind.Combo,
                     Choices = ["store", "compressed"] },
                 new CommandField { Id = "manifest", Label = "Write build manifest (.json)", Kind = FieldKind.Check },
@@ -198,7 +357,9 @@ public static class CommandRegistry
                 new CommandField { Id = "gp4", Label = "Project (.gp4)", Kind = FieldKind.File,
                     Filter = "GP4 projects (*.gp4)|*.gp4|All files (*.*)|*.*", Position = 0 },
                 new CommandField { Id = "folder", Label = "Source folder (Image0)", Kind = FieldKind.Folder, Position = 1 },
-                Out(), Passcode(),
+                Out(),
+                new CommandField { Id = "passcode", Label = "Passcode (32 hex)", Kind = FieldKind.Text,
+                    Default = CommandDef.DefaultPasscode },
             ],
             BuildArgs = f =>
             {
@@ -219,7 +380,9 @@ public static class CommandRegistry
             CliWord = "gp4gen",
             Fields = [
                 new CommandField { Id = "folder", Label = "Folder (Image0)", Kind = FieldKind.Folder, Position = 0 },
-                Out(), Passcode(),
+                Out(),
+                new CommandField { Id = "passcode", Label = "Passcode (32 hex)", Kind = FieldKind.Text,
+                    Default = CommandDef.DefaultPasscode },
                 new CommandField { Id = "patch", Label = "Patch project (not app)", Kind = FieldKind.Check },
                 new CommandField { Id = "title", Label = "Title", Kind = FieldKind.Text },
                 new CommandField { Id = "titleid", Label = "Title ID (CUSAxxxxx)", Kind = FieldKind.Text, Default = "CUSA00001" },
@@ -384,64 +547,41 @@ public static class CommandRegistry
             },
         });
 
-        // ----------------------------------------------------- dumpinner
+        // ------------------------------------------------------- selftest
         cmds.Add(new CommandDef
         {
-            Name = "dumpinner", Group = "Diagnostics", Title = "Extract raw inner PFS",
-            Description = "Extract the raw decompressed inner PFS to a file (streaming, >2GB safe).",
-            CliWord = "dumpinner",
-            Fields = [Pkg(),
-                new CommandField { Id = "out", Label = "Output (.pfs)", Kind = FieldKind.SaveFile,
-                    Filter = "PFS images (*.pfs)|*.pfs|All files (*.*)|*.*", Position = 1 }],
-            BuildArgs = f => [f["pkg"], f["out"]],
+            Name = "selftest", Group = "Tools", Title = "Validate embedded RSA keys",
+            Description = "Validate the embedded key constants.",
+            CliWord = "selftest",
+            Fields = [],
+            BuildArgs = _ => [],
         });
 
-        // ------------------------------------------------------ dumppfsc
+        // ---------------------------------------------------- emptypayload
         cmds.Add(new CommandDef
         {
-            Name = "dumppfsc", Group = "Diagnostics", Title = "Extract raw PFSC container",
-            Description = "Extract the raw PFSC-compressed pfs_image.dat to a file.",
-            CliWord = "dumppfsc",
-            Fields = [Pkg(),
-                new CommandField { Id = "out", Label = "Output (.pfsc)", Kind = FieldKind.SaveFile,
-                    Filter = "PFSC images (*.pfsc)|*.pfsc|All files (*.*)|*.*", Position = 1 }],
-            BuildArgs = f => [f["pkg"], f["out"]],
+            Name = "emptypayload", Group = "Tools", Title = "Write empty inner payload",
+            Description = "Write an empty inner PFS payload file (diagnostic).",
+            CliWord = "emptypayload",
+            Fields = [new CommandField { Id = "out", Label = "Output (.pfsc)", Kind = FieldKind.SaveFile,
+                Filter = "PFSC images (*.pfsc)|*.pfsc|All files (*.*)|*.*", Position = 0 }],
+            BuildArgs = f => [f["out"]],
         });
 
-        // ------------------------------------------------------- xtsdump
+        // -------------------------------------------------------- hashtest
         cmds.Add(new CommandDef
         {
-            Name = "xtsdump", Group = "Diagnostics", Title = "Dump XTS-decrypted data",
-            Description = "Decrypt and dump a region of the PKG image (XTS sectors).",
-            CliWord = "xtsdump",
-            Fields = [Pkg(),
-                new CommandField { Id = "out", Label = "Output", Kind = FieldKind.SaveFile, Position = 1 }],
-            BuildArgs = f => [f["pkg"], f["out"]],
+            Name = "hashtest", Group = "Tools", Title = "FPT hash reference values",
+            Description = "Print FPT hash values for reference paths (diagnostic).",
+            CliWord = "hashtest",
+            Fields = [],
+            BuildArgs = _ => [],
         });
 
-        // ------------------------------------------------------ pfsdump
+        // ----------------------------------------------------- pfscompare
         cmds.Add(new CommandDef
         {
-            Name = "pfsdump", Group = "Diagnostics", Title = "Dump outer PFS structure",
-            Description = "Dump the outer PFS structure (headers, inodes, dirents).",
-            CliWord = "pfsdump",
-            Fields = [Pkg(), new CommandField
-            {
-                Id = "saveinner", Label = "Also save inner PFS (out.pfs)", Kind = FieldKind.SaveFile,
-                Filter = "PFS images (*.pfs)|*.pfs|All files (*.*)|*.*",
-            }],
-            BuildArgs = f =>
-            {
-                if (f["saveinner"] is { Length: > 0 } o)
-                    return ["--save-inner", f["pkg"], o];
-                return [f["pkg"]];
-            },
-        });
-
-        // ---------------------------------------------------- pfscompare
-        cmds.Add(new CommandDef
-        {
-            Name = "pfscompare", Group = "Diagnostics", Title = "Compare two PFS images",
+            Name = "pfscompare", Group = "Tools", Title = "Compare two PFS images",
             Description = "Byte-compare two raw PFS images (headers, inodes, dirents) for compatibility debugging.",
             CliWord = "pfscompare",
             Fields = [
@@ -453,122 +593,10 @@ public static class CommandRegistry
             BuildArgs = f => [f["ours"], f["orbis"]],
         });
 
-        // ----------------------------------------------------- signverify
+        // ----------------------------------------------------- inflatecheck
         cmds.Add(new CommandDef
         {
-            Name = "signverify", Group = "Diagnostics", Title = "Verify outer PFS signatures",
-            Description = "Verify the outer PFS HMAC signature slots (diagnostic).",
-            CliWord = "signverify",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
-        });
-
-        // ------------------------------------------------------ resignpfs
-        cmds.Add(new CommandDef
-        {
-            Name = "resignpfs", Group = "Diagnostics", Title = "Resign outer PFS",
-            Description = "Recompute and rewrite the outer PFS HMAC signatures in place (diagnostic).",
-            CliWord = "resignpfs",
-            Fields = [Pkg(), new CommandField
-            {
-                Id = "maxblocks", Label = "Max blocks (blank = all)", Kind = FieldKind.Text,
-            }],
-            BuildArgs = f =>
-            {
-                var a = new List<string> { f["pkg"] };
-                if (f["maxblocks"] is { Length: > 0 } m) a.Add(m);
-                return a.ToArray();
-            },
-        });
-
-        // ----------------------------------------------------- fixdigests
-        cmds.Add(new CommandDef
-        {
-            Name = "fixdigests", Group = "Diagnostics", Title = "Recompute PKG digests",
-            Description = "Recompute all header digests of an existing PKG in place (diagnostic; keeps orbis format check happy after patching).",
-            CliWord = "fixdigests",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
-        });
-
-        // -------------------------------------------------------- innerfpt
-        cmds.Add(new CommandDef
-        {
-            Name = "innerfpt", Group = "Diagnostics", Title = "Dump inner PFS flat path table",
-            Description = "Dump the inner PFS flat path table (diagnostic).",
-            CliWord = "innerfpt",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
-        });
-
-        // -------------------------------------------------------- pfsblock
-        cmds.Add(new CommandDef
-        {
-            Name = "pfsblock", Group = "Diagnostics", Title = "Dump a PFS block",
-            Description = "Dump a specific outer PFS block (diagnostic).",
-            CliWord = "pfsblock",
-            Fields = [Pkg(), new CommandField
-            {
-                Id = "block", Label = "Block number", Kind = FieldKind.Text, Position = 1,
-            }],
-            BuildArgs = f => [f["pkg"], f["block"]],
-        });
-
-        // ---------------------------------------------------------- iblock
-        cmds.Add(new CommandDef
-        {
-            Name = "iblock", Group = "Diagnostics", Title = "Dump an inner PFS block",
-            Description = "Dump a specific inner PFS block (diagnostic).",
-            CliWord = "iblock",
-            Fields = [Pkg(), new CommandField
-            {
-                Id = "block", Label = "Block number", Kind = FieldKind.Text, Position = 1,
-            }],
-            BuildArgs = f => [f["pkg"], f["block"]],
-        });
-
-        // ------------------------------------------------------- buildtest
-        cmds.Add(new CommandDef
-        {
-            Name = "buildtest", Group = "Diagnostics", Title = "Build PKG with arbitrary payload",
-            Description = "Build a PKG with an arbitrary pfs_image.dat payload (diagnostic).",
-            CliWord = "buildtest",
-            Fields = [
-                new CommandField { Id = "gp4", Label = "Project (.gp4)", Kind = FieldKind.File,
-                    Filter = "GP4 projects (*.gp4)|*.gp4|All files (*.*)|*.*", Position = 0 },
-                new CommandField { Id = "folder", Label = "Source folder", Kind = FieldKind.Folder, Position = 1 },
-                new CommandField { Id = "data", Label = "Payload data file", Kind = FieldKind.File, Position = 2 },
-                new CommandField { Id = "out", Label = "Output (.pkg)", Kind = FieldKind.SaveFile,
-                    Filter = "PS4 Packages (*.pkg)|*.pkg|All files (*.*)|*.*", Position = 3 },
-            ],
-            BuildArgs = f => [f["gp4"], f["folder"], f["data"], f["out"]],
-        });
-
-        // ---------------------------------------------------- emptypayload
-        cmds.Add(new CommandDef
-        {
-            Name = "emptypayload", Group = "Diagnostics", Title = "Write empty inner payload",
-            Description = "Write an empty inner PFS payload file (diagnostic).",
-            CliWord = "emptypayload",
-            Fields = [new CommandField { Id = "out", Label = "Output (.pfsc)", Kind = FieldKind.SaveFile,
-                Filter = "PFSC images (*.pfsc)|*.pfsc|All files (*.*)|*.*", Position = 0 }],
-            BuildArgs = f => [f["out"]],
-        });
-
-        // -------------------------------------------------------- xtstest
-        cmds.Add(new CommandDef
-        {
-            Name = "xtstest", Group = "Diagnostics", Title = "XTS encryption test",
-            Description = "XTS sector encrypt/decrypt round-trip test (diagnostic).",
-            CliWord = "xtstest",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
-        });
-
-        // ------------------------------------------------------- inflatecheck
-        cmds.Add(new CommandDef
-        {
-            Name = "inflatecheck", Group = "Diagnostics", Title = "Test PFSC block inflate",
+            Name = "inflatecheck", Group = "Tools", Title = "Test PFSC block inflate",
             Description = "Try to inflate the first PFSC block (diagnostic).",
             CliWord = "inflatecheck",
             Fields = [
@@ -586,7 +614,7 @@ public static class CommandRegistry
         // -------------------------------------------------------- leveltest
         cmds.Add(new CommandDef
         {
-            Name = "leveltest", Group = "Diagnostics", Title = "Compression level comparison",
+            Name = "leveltest", Group = "Tools", Title = "Compression level comparison",
             Description = "Compare deflate levels against an orbis PFSC block (diagnostic).",
             CliWord = "leveltest",
             Fields = [
@@ -599,31 +627,28 @@ public static class CommandRegistry
         // -------------------------------------------------------- deftest
         cmds.Add(new CommandDef
         {
-            Name = "deftest", Group = "Diagnostics", Title = "Deflate test on block 0",
+            Name = "deftest", Group = "Tools", Title = "Deflate test on block 0",
             Description = "Try raw deflate variants on the first PFSC block (diagnostic).",
             CliWord = "deftest",
             Fields = [new CommandField { Id = "file", Label = "PFSC file", Kind = FieldKind.File, Position = 0 }],
             BuildArgs = f => [f["file"]],
         });
 
-        // -------------------------------------------------------- blkcount
+        // -------------------------------------------------------- buildtest
         cmds.Add(new CommandDef
         {
-            Name = "blkcount", Group = "Diagnostics", Title = "Count pfs_image.dat blocks",
-            Description = "Enumerate and count outer-PFS pfs_image.dat blocks (diagnostic).",
-            CliWord = "blkcount",
-            Fields = [Pkg()],
-            BuildArgs = f => [f["pkg"]],
-        });
-
-        // -------------------------------------------------------- hashtest
-        cmds.Add(new CommandDef
-        {
-            Name = "hashtest", Group = "Diagnostics", Title = "FPT hash reference values",
-            Description = "Print FPT hash values for reference paths (diagnostic).",
-            CliWord = "hashtest",
-            Fields = [],
-            BuildArgs = _ => [],
+            Name = "buildtest", Group = "Tools", Title = "Build PKG with arbitrary payload",
+            Description = "Build a PKG with an arbitrary pfs_image.dat payload (diagnostic).",
+            CliWord = "buildtest",
+            Fields = [
+                new CommandField { Id = "gp4", Label = "Project (.gp4)", Kind = FieldKind.File,
+                    Filter = "GP4 projects (*.gp4)|*.gp4|All files (*.*)|*.*", Position = 0 },
+                new CommandField { Id = "folder", Label = "Source folder", Kind = FieldKind.Folder, Position = 1 },
+                new CommandField { Id = "data", Label = "Payload data file", Kind = FieldKind.File, Position = 2 },
+                new CommandField { Id = "out", Label = "Output (.pkg)", Kind = FieldKind.SaveFile,
+                    Filter = "PS4 Packages (*.pkg)|*.pkg|All files (*.*)|*.*", Position = 3 },
+            ],
+            BuildArgs = f => [f["gp4"], f["folder"], f["data"], f["out"]],
         });
 
         return cmds;

@@ -10,4 +10,18 @@
     <RootNamespace>OrbisPkgTool.Gui</RootNamespace>
   </PropertyGroup>
 
+  <!-- In-process metadata summary: PkgReader.GetInfo() -->
+  <ItemGroup>
+    <ProjectReference Include="..\OrbisPkgTool\OrbisPkgTool.csproj" />
+  </ItemGroup>
+
+  <!-- Keep OrbisPkgTool.exe (the CLI, run as an external process for every
+       operation) next to the GUI exe so ResolveCli() finds it in-tree. -->
+  <Target Name="CopyCliExe" AfterTargets="Build">
+    <ItemGroup>
+      <CliExe Include="$(MSBuildThisFileDirectory)..\OrbisPkgTool\bin\$(Configuration)\net10.0-windows\OrbisPkgTool.exe" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CliExe)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('%(CliExe.Identity)')" />
+  </Target>
+
 </Project>

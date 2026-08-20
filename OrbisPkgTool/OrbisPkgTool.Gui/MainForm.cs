@@ -5,42 +5,43 @@ namespace OrbisPkgTool.Gui;
 
 public sealed class MainForm : Form
 {
+    // ------------------------------------------------------------------
     // Layout constants
-    private const int TreeWidth = 240;
+    // ------------------------------------------------------------------
+    private const int OutputHeight = 240;
 
-    private readonly TreeView _tree = new();
-    private readonly FlowLayoutPanel _fieldsPanel = new();
-    private readonly Label _descLabel = new();
-    private readonly Button _runButton = new();
-    private readonly Button _cancelButton = new();
-    private readonly Button _clearButton = new();
-    private readonly TextBox _output = new();
+    private readonly PackageBar _packageBar = new();
+    private readonly OperationsPane _pkgOps = new();
+    private readonly OperationsPane _toolOps = new();
+    private readonly OutputConsole _output = new();
     private readonly StatusStrip _status = new();
+    private readonly ToolStripStatusLabel _pkgStatusLabel = new();
     private readonly ToolStripStatusLabel _statusLabel = new();
+    private readonly ToolStripStatusLabel _lastRunLabel = new();
 
-    private readonly Dictionary<string, Control> _fieldControls = new();
-    private readonly Dictionary<string, CommandDef> _commands = new();
-    private readonly List<string> _recentPkgs = [];
-    private CommandDef? _current;
+    private readonly SplitContainer _outputSplit = new();
+    private readonly TabControl _tabControl = new();
+
     private Process? _proc;
     private CancellationTokenSource? _cts;
+    private OperationsPane? _activePane;
     private readonly string _settingsPath;
 
     public MainForm()
     {
         Text = "OrbisPkgTool GUI";
-        Width = 1100;
-        Height = 760;
-        MinimumSize = new Size(760, 480);
+        Width = 1180;
+        Height = 820;
+        MinimumSize = new Size(820, 540);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
 
         _settingsPath = Path.Combine(AppContext.BaseDirectory, "orbispkgtool.gui.settings.txt");
 
         BuildLayout();
-        PopulateTree();
+        WireEvents();
+        PopulateOps();
         LoadSettings();
-        SelectFirstCommand();
     }
 
     // ------------------------------------------------------------------
@@ -48,349 +49,232 @@ public sealed class MainForm : Form
     // ------------------------------------------------------------------
     private void BuildLayout()
     {
-        // Top bar: CLI path + Run/Cancel/Clear
-        var top = new TableLayoutPanel
+        // Package bar (top)
+        _packageBar.Dock = DockStyle.Top;
+
+        // TabControl (Package | Build & Tools) — each tab holds an OperationsPane
+        _tabControl.Dock = DockStyle.Fill;
+        _tabControl.Padding = new Point(8, 4);
+
+        var pkgTab = new TabPage("Package")
         {
-            Dock = DockStyle.Top,
-            Height = 38,
-            ColumnCount = 6,
-            Padding = new Padding(6, 4, 6, 4),
+            Padding = new Padding(4),
         };
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 30));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        pkgTab.Controls.Add(_pkgOps);
+        _tabControl.TabPages.Add(pkgTab);
 
-        var cliLabel = new Label { Text = "CLI:", Anchor = AnchorStyles.Left, AutoSize = true };
-        _cliPathBox = new TextBox { Dock = DockStyle.Fill };
-        _cliPathBox.TextChanged += (_, _) => SaveSettings();
-        var browse = new Button { Text = "...", Dock = DockStyle.Fill };
-        browse.Click += (_, _) =>
+        var toolTab = new TabPage("Build & Tools")
         {
-            using var dlg = new OpenFileDialog
-            {
-                Title = "Select OrbisPkgTool.exe",
-                Filter = "OrbisPkgTool CLI (*.exe)|OrbisPkgTool.exe|All files (*.*)|*.*",
-            };
-            if (dlg.ShowDialog(this) == DialogResult.OK) _cliPathBox.Text = dlg.FileName;
+            Padding = new Padding(4),
         };
-        _runButton.Text = "Run";
-        _runButton.Dock = DockStyle.Fill;
-        _runButton.Click += async (_, _) => await RunAsync();
-        _cancelButton.Text = "Cancel";
-        _cancelButton.Dock = DockStyle.Fill;
-        _cancelButton.Enabled = false;
-        _cancelButton.Click += (_, _) => _cts?.Cancel();
-        _clearButton.Text = "Clear";
-        _clearButton.Dock = DockStyle.Fill;
-        _clearButton.Click += (_, _) => _output.Clear();
-
-        top.Controls.Add(cliLabel, 0, 0);
-        top.Controls.Add(_cliPathBox, 1, 0);
-        top.Controls.Add(browse, 2, 0);
-        top.Controls.Add(_runButton, 3, 0);
-        top.Controls.Add(_cancelButton, 4, 0);
-        top.Controls.Add(_clearButton, 5, 0);
-
-        // Left: command tree
-        _tree.Dock = DockStyle.Fill;
-        _tree.HideSelection = false;
-        _tree.AfterSelect += (_, e) => SelectCommand(e.Node);
-
-        // Right: description + dynamic fields
-        _descLabel.Dock = DockStyle.Top;
-        _descLabel.AutoEllipsis = true;
-        _descLabel.Padding = new Padding(4);
-        _descLabel.BackColor = Color.FromArgb(240, 240, 245);
-        _descLabel.Height = 44;
-
-        _fieldsPanel.Dock = DockStyle.Fill;
-        _fieldsPanel.AutoScroll = true;
-        _fieldsPanel.FlowDirection = FlowDirection.TopDown;
-        _fieldsPanel.WrapContents = false;
-
-        var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(6) };
-        right.Controls.Add(_fieldsPanel);
-        right.Controls.Add(_descLabel);
-
-        // Splitter: tree | right (min sizes applied in OnLoad — setting
-        // them here throws before the form is sized)
-        var split = new SplitContainer { Dock = DockStyle.Fill };
-        _split = split;
-        split.Panel1.Controls.Add(_tree);
-        split.Panel2.Controls.Add(right);
+        toolTab.Controls.Add(_toolOps);
+        _tabControl.TabPages.Add(toolTab);
 
         // Output console (bottom)
         _output.Dock = DockStyle.Fill;
-        _output.Multiline = true;
-        _output.ReadOnly = true;
-        _output.ScrollBars = ScrollBars.Both;
-        _output.WordWrap = false;
-        _output.Font = new Font("Cascadia Mono", 9f);
-        _output.BackColor = Color.FromArgb(30, 30, 30);
-        _output.ForeColor = Color.FromArgb(220, 220, 220);
 
-        var outputPanel = new Panel { Dock = DockStyle.Bottom, Height = 260, Padding = new Padding(6) };
-        outputPanel.Controls.Add(_output);
+        // Vertical splitter: tabs on top, output console on bottom
+        _outputSplit.Dock = DockStyle.Fill;
+        _outputSplit.Orientation = Orientation.Horizontal;
+        _outputSplit.SplitterDistance = 0; // set in OnLoad
+        _outputSplit.Panel1.Controls.Add(_tabControl);
+        _outputSplit.Panel2.Controls.Add(_output);
+        _outputSplit.Panel2MinSize = 120;
 
         // Status bar
-        _statusLabel.Text = "Ready";
+        _pkgStatusLabel.Text = "No package selected.";
+        _pkgStatusLabel.Spring = true;
+        _pkgStatusLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _pkgStatusLabel.Margin = new Padding(2, 3, 8, 2);
+        _statusLabel.Text = "Ready.";
+        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _statusLabel.Margin = new Padding(0, 3, 16, 2);
+        _lastRunLabel.Text = "";
+        _lastRunLabel.TextAlign = ContentAlignment.MiddleRight;
+        _lastRunLabel.Margin = new Padding(0, 3, 2, 2);
+        _status.Items.Add(_pkgStatusLabel);
         _status.Items.Add(_statusLabel);
+        _status.Items.Add(_lastRunLabel);
 
-        Controls.Add(split);
-        Controls.Add(outputPanel);
-        Controls.Add(top);
+        Controls.Add(_outputSplit);
+        Controls.Add(_packageBar);
         Controls.Add(_status);
     }
-
-    private TextBox _cliPathBox = new();
-    private SplitContainer? _split;
 
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        if (_split != null)
+        // Apply saved window bounds, splitters, last tab
+        // (Loaded from settings file in LoadSettings())
+        _outputSplit.SplitterDistance = Math.Max(200, Height - OutputHeight - _packageBar.Height - _status.Height - 30);
+        _pkgOps.Split.SplitterDistance = 220;
+        _toolOps.Split.SplitterDistance = 220;
+        // The OnLoad default values are overwritten by LoadSettings, but
+        // LoadSettings is called from the constructor — which runs before
+        // OnLoad — so we re-apply saved bounds here as a final pass.
+        ApplySavedBoundsIfAny();
+    }
+
+    private void ApplySavedBoundsIfAny()
+    {
+        if (_savedWidth > 0 && _savedHeight > 0)
         {
-            _split.Panel1MinSize = 160;
-            _split.Panel2MinSize = 420;
-            _split.SplitterDistance = Math.Min(TreeWidth, _split.Width - _split.Panel2MinSize - 8);
+            Width = _savedWidth;
+            Height = _savedHeight;
+            if (_savedLeft != int.MinValue && _savedTop != int.MinValue)
+            {
+                StartPosition = FormStartPosition.Manual;
+                Left = _savedLeft;
+                Top = _savedTop;
+            }
         }
+        if (_savedPkgSplit > 0) _pkgOps.Split.SplitterDistance = _savedPkgSplit;
+        if (_savedToolSplit > 0) _toolOps.Split.SplitterDistance = _savedToolSplit;
+        if (_savedOutputSplit > 0)
+            _outputSplit.SplitterDistance = _savedOutputSplit;
+        if (_savedTab >= 0 && _savedTab < _tabControl.TabCount)
+            _tabControl.SelectedIndex = _savedTab;
     }
 
+    private int _savedWidth, _savedHeight, _savedLeft = int.MinValue, _savedTop = int.MinValue;
+    private int _savedPkgSplit, _savedToolSplit, _savedOutputSplit, _savedTab;
+
     // ------------------------------------------------------------------
-    // Command tree
+    // Events + ops population
     // ------------------------------------------------------------------
-    private void PopulateTree()
+    private void WireEvents()
     {
-        _tree.BeginUpdate();
-        _tree.Nodes.Clear();
-        var byGroup = CommandRegistry.All.GroupBy(c => c.Group).OrderBy(g => g.Key);
-        foreach (var g in byGroup)
+        _packageBar.PackageChanged += (_, _) => UpdatePackageStatus();
+
+        _pkgOps.RunRequested += (cmd, values) => OnRunRequested(_pkgOps, cmd, values);
+        _pkgOps.CancelRequested += () => _cts?.Cancel();
+        _pkgOps.SelectionChanged += cmd => _statusLabel.Text = cmd != null ? $"Selected: {cmd.CliWord}" : "Ready.";
+
+        _toolOps.RunRequested += (cmd, values) => OnRunRequested(_toolOps, cmd, values);
+        _toolOps.CancelRequested += () => _cts?.Cancel();
+        _toolOps.SelectionChanged += cmd => _statusLabel.Text = cmd != null ? $"Selected: {cmd.CliWord}" : "Ready.";
+
+        _tabControl.SelectedIndexChanged += (_, _) =>
         {
-            var node = new TreeNode(g.Key);
-            foreach (var c in g.OrderBy(c => c.Name))
-            {
-                _commands[c.Name] = c;
-                node.Nodes.Add(new TreeNode(c.Name) { Tag = c });
-            }
-            _tree.Nodes.Add(node);
-            node.Expand();
-        }
-        _tree.EndUpdate();
-    }
-
-    private void SelectFirstCommand()
-    {
-        if (_tree.Nodes.Count > 0 && _tree.Nodes[0].Nodes.Count > 0)
-            _tree.SelectedNode = _tree.Nodes[0].Nodes[0];
-    }
-
-    private void SelectCommand(TreeNode node)
-    {
-        if (node?.Tag is not CommandDef cmd) return;
-        _current = cmd;
-        _descLabel.Text = $"{cmd.Title} — {cmd.Description}";
-        BuildFields(cmd);
-        _runButton.Enabled = true;
-    }
-
-    // ------------------------------------------------------------------
-    // Dynamic fields
-    // ------------------------------------------------------------------
-    private void BuildFields(CommandDef cmd)
-    {
-        _fieldsPanel.SuspendLayout();
-        _fieldsPanel.Controls.Clear();
-        _fieldControls.Clear();
-
-        foreach (var f in cmd.Fields)
-        {
-            var row = new TableLayoutPanel
-            {
-                AutoSize = true,
-                ColumnCount = 2,
-                Width = _fieldsPanel.ClientSize.Width - 24,
-                Padding = new Padding(2, 2, 2, 2),
-            };
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-            var label = new Label { Text = f.Label, AutoSize = true, Anchor = AnchorStyles.Left, Padding = new Padding(0, 4, 0, 0) };
-
-            Control input;
-            switch (f.Kind)
-            {
-                case FieldKind.File:
-                    input = MakeFileRow(f, open: true);
-                    break;
-                case FieldKind.SaveFile:
-                    input = MakeFileRow(f, open: false);
-                    break;
-                case FieldKind.Folder:
-                    input = MakeFolderRow(f);
-                    break;
-                case FieldKind.Combo:
-                    var combo = new ComboBox
-                    {
-                        DropDownStyle = ComboBoxStyle.DropDownList,
-                        Width = 420,
-                        Anchor = AnchorStyles.Left | AnchorStyles.Right,
-                    };
-                    combo.Items.AddRange(f.Choices);
-                    if (combo.Items.Count > 0)
-                        combo.SelectedIndex = Math.Max(0, Array.IndexOf(f.Choices, f.Default));
-                    input = combo;
-                    break;
-                case FieldKind.Check:
-                    input = new CheckBox { Text = "", AutoSize = true, Checked = f.Default == "1" };
-                    break;
-                default:
-                    var box = new TextBox { Width = 420, Anchor = AnchorStyles.Left | AnchorStyles.Right, Text = f.Default };
-                    input = box;
-                    break;
-            }
-
-            _fieldControls[f.Id] = input;
-            row.Controls.Add(label, 0, 0);
-            row.Controls.Add(input, 1, 0);
-            _fieldsPanel.Controls.Add(row);
-        }
-
-        _fieldsPanel.ResumeLayout(true);
-    }
-
-    private Control MakeFileRow(CommandField f, bool open)
-    {
-        var panel = new TableLayoutPanel { ColumnCount = 2, Width = 420, AutoSize = true, Margin = new Padding(0) };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 30));
-
-        var box = new TextBox { Dock = DockStyle.Fill, Text = f.Default };
-        var btn = new Button { Text = "...", Dock = DockStyle.Fill, Width = 28 };
-        btn.Click += (_, _) =>
-        {
-            if (open)
-            {
-                using var dlg = new OpenFileDialog { Title = f.Label, Filter = f.Filter.Length > 0 ? f.Filter : "All files (*.*)|*.*" };
-                if (dlg.ShowDialog(this) == DialogResult.OK) box.Text = dlg.FileName;
-            }
-            else
-            {
-                using var dlg = new SaveFileDialog { Title = f.Label, Filter = f.Filter.Length > 0 ? f.Filter : "All files (*.*)|*.*" };
-                if (dlg.ShowDialog(this) == DialogResult.OK) box.Text = dlg.FileName;
-            }
+            _activePane = _tabControl.SelectedIndex == 0 ? _pkgOps : _toolOps;
         };
-        panel.Controls.Add(box, 0, 0);
-        panel.Controls.Add(btn, 1, 0);
-        return panel;
+        _activePane = _pkgOps; // default to Package tab
     }
 
-    private Control MakeFolderRow(CommandField f)
+    private void PopulateOps()
     {
-        var panel = new TableLayoutPanel { ColumnCount = 2, Width = 420, AutoSize = true, Margin = new Padding(0) };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 30));
+        _pkgOps.SetCommands(CommandRegistry.PackageOps);
+        _toolOps.SetCommands(CommandRegistry.ToolOps);
+    }
 
-        var box = new TextBox { Dock = DockStyle.Fill, Text = f.Default };
-        var btn = new Button { Text = "...", Dock = DockStyle.Fill, Width = 28 };
-        btn.Click += (_, _) =>
-        {
-            using var dlg = new FolderBrowserDialog { Description = f.Label, UseDescriptionForTitle = true };
-            if (dlg.ShowDialog(this) == DialogResult.OK) box.Text = dlg.SelectedPath;
-        };
-        panel.Controls.Add(box, 0, 0);
-        panel.Controls.Add(btn, 1, 0);
-        return panel;
+    private void UpdatePackageStatus()
+    {
+        string path = _packageBar.PackagePath;
+        if (path.Length > 0)
+            _pkgStatusLabel.Text = $"PKG: {Path.GetFileName(path)}    Passcode: {_packageBar.Passcode}";
+        else
+            _pkgStatusLabel.Text = "No package selected.";
     }
 
     // ------------------------------------------------------------------
-    // Run
+    // Run pipeline (shared by both tabs)
     // ------------------------------------------------------------------
-    private async Task RunAsync()
+    private async void OnRunRequested(OperationsPane pane, CommandDef cmd, IReadOnlyDictionary<string, string> values)
     {
-        if (_current == null) return;
+        // Only one run at a time — disable both panes for the duration
+        _pkgOps.SetRunning(true);
+        _toolOps.SetRunning(true);
 
-        var exe = ResolveCli();
+        string? exe = ResolveCli();
         if (exe == null)
         {
             MessageBox.Show(this,
-                "OrbisPkgTool.exe not found.\nSelect it with the \"...\" button next to CLI path.",
+                "OrbisPkgTool.exe not found.\nBuild the OrbisPkgTool project (it's copied next to the GUI automatically).",
                 "CLI not found", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _pkgOps.SetRunning(false);
+            _toolOps.SetRunning(false);
             return;
         }
 
-        var values = new Dictionary<string, string>();
-        foreach (var kv in _fieldControls)
+        // For Package-tab ops, inject pkg + passcode from the bar
+        var effectiveValues = new Dictionary<string, string>(values);
+        bool isPkgOp = pane == _pkgOps;
+        if (isPkgOp)
         {
-            values[kv.Key] = kv.Value switch
+            effectiveValues["pkg"] = _packageBar.PackagePath;
+            effectiveValues["passcode"] = _packageBar.Passcode;
+            if (string.IsNullOrWhiteSpace(effectiveValues["pkg"]))
             {
-                TextBox t => t.Text.Trim(),
-                ComboBox c => c.SelectedItem?.ToString() ?? "",
-                CheckBox ck => ck.Checked ? "1" : "0",
-                TableLayoutPanel tp => GetTextBoxOfFileRow(tp)?.Text.Trim() ?? "",
-                _ => "",
-            };
+                MessageBox.Show(this, "Select a PKG file in the package bar first.", "No package",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _pkgOps.SetRunning(false);
+                _toolOps.SetRunning(false);
+                return;
+            }
         }
 
+        // Build args
         string[] args;
         try
         {
-            args = _current.BuildArgs(values);
+            args = cmd.BuildArgs(effectiveValues);
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, $"Cannot build arguments: {ex.Message}", "Argument error",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _pkgOps.SetRunning(false);
+            _toolOps.SetRunning(false);
             return;
         }
 
-        // The CLI dispatches on cmdArgs[0] — the command word(s) must
-        // come BEFORE the flags. For sub-commands like "sfo read",
-        // split the CliWord so both tokens become leading args.
-        var cliWords = _current.CliWord.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        // Prepend the CLI word(s)
+        var cliWords = cmd.CliWord.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var fullArgs = new string[cliWords.Length + args.Length];
         Array.Copy(cliWords, 0, fullArgs, 0, cliWords.Length);
         Array.Copy(args, 0, fullArgs, cliWords.Length, args.Length);
-        args = fullArgs;
+
+        // New tab for this run
+        var page = _output.StartRun(cmd.Name);
 
         _cts = new CancellationTokenSource();
-        _runButton.Enabled = false;
-        _cancelButton.Enabled = true;
-        _statusLabel.Text = $"Running: {_current.CliWord}";
-        AppendLine($"> {Path.GetFileName(exe)} {string.Join(' ', args)}");
-        AppendLine("");
+        _statusLabel.Text = $"Running: {cmd.CliWord}";
+        _output.AppendLine(page, $"> {Path.GetFileName(exe)} {string.Join(' ', fullArgs)}");
+        _output.AppendLine(page, "");
 
+        var sw = Stopwatch.StartNew();
         try
         {
-            var sw = Stopwatch.StartNew();
-            int exit = await RunProcessAsync(exe, args, _cts.Token);
+            int exit = await RunProcessAsync(exe, fullArgs, page, _cts.Token);
             sw.Stop();
-            AppendLine("");
-            AppendLine(exit == 0
-                ? $"=== EXIT 0 in {sw.Elapsed.TotalSeconds:F1}s ==="
-                : $"=== EXIT {exit} in {sw.Elapsed.TotalSeconds:F1}s ===");
-            _statusLabel.Text = exit == 0 ? $"Done in {sw.Elapsed.TotalSeconds:F1}s" : $"Failed (exit {exit})";
+            bool success = exit == 0;
+            _output.FinishRun(page, success, sw.Elapsed.TotalSeconds);
+            _statusLabel.Text = success ? $"Done in {sw.Elapsed.TotalSeconds:F1}s" : $"Failed (exit {exit})";
+            _lastRunLabel.Text = $"Last run: {cmd.Name} {(success ? "✓" : "✗")} {sw.Elapsed.TotalSeconds:F1}s  {DateTime.Now:HH:mm}";
+
+            // Remember the PKG if this was a Package-tab op
+            if (isPkgOp && success)
+                _packageBar.AddRecent(_packageBar.PackagePath);
         }
         catch (OperationCanceledException)
         {
-            AppendLine("=== CANCELLED ===");
+            _output.CancelRun(page);
             _statusLabel.Text = "Cancelled";
         }
         catch (Exception ex)
         {
-            AppendLine($"=== ERROR: {ex.Message} ===");
+            _output.ErrorRun(page, ex.Message);
             _statusLabel.Text = "Error";
         }
         finally
         {
-            _runButton.Enabled = true;
-            _cancelButton.Enabled = false;
+            _proc = null;
+            _pkgOps.SetRunning(false);
+            _toolOps.SetRunning(false);
         }
     }
 
-    private async Task<int> RunProcessAsync(string exe, string[] args, CancellationToken ct)
+    private async Task<int> RunProcessAsync(string exe, string[] args, TabPage page, CancellationToken ct)
     {
         var psi = new ProcessStartInfo
         {
@@ -405,9 +289,8 @@ public sealed class MainForm : Form
         using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         _proc = proc;
 
-        var sb = new StringBuilder();
-        proc.OutputDataReceived += (_, e) => { if (e.Data != null) AppendLine(e.Data); };
-        proc.ErrorDataReceived += (_, e) => { if (e.Data != null) AppendLine(e.Data); };
+        proc.OutputDataReceived += (_, e) => { if (e.Data != null) _output.AppendLine(page, e.Data); };
+        proc.ErrorDataReceived += (_, e) => { if (e.Data != null) _output.AppendLine(page, e.Data); };
 
         if (!proc.Start())
             throw new InvalidOperationException("Process failed to start.");
@@ -428,31 +311,36 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // Settings + helpers
+    // CLI resolution (auto-detect OrbisPkgTool.exe next to GUI exe)
     // ------------------------------------------------------------------
     private string? ResolveCli()
     {
-        if (_cliPathBox.Text.Length > 0 && File.Exists(_cliPathBox.Text))
-            return _cliPathBox.Text;
+        // 1. Same directory as GUI exe (the CopyCliExe MSBuild target puts it here)
+        var probe = Path.Combine(AppContext.BaseDirectory, "OrbisPkgTool.exe");
+        if (File.Exists(probe)) return probe;
 
-        // Auto-detect relative to this assembly: bin/Debug/net10.0-windows/
+        // 2. Walk up from the GUI bin dir
         var baseDir = AppContext.BaseDirectory;
         for (int i = 0; i < 8; i++)
         {
-            var probe = Path.Combine(baseDir, "OrbisPkgTool.exe");
-            if (File.Exists(probe)) { _cliPathBox.Text = probe; return probe; }
+            probe = Path.Combine(baseDir, "OrbisPkgTool.exe");
+            if (File.Exists(probe)) return probe;
+            probe = Path.Combine(baseDir, "OrbisPkgTool", "bin", "Debug", "net10.0-windows", "OrbisPkgTool.exe");
+            if (File.Exists(probe)) return probe;
+            probe = Path.Combine(baseDir, "OrbisPkgTool", "bin", "Release", "net10.0-windows", "OrbisPkgTool.exe");
+            if (File.Exists(probe)) return probe;
             baseDir = Path.GetDirectoryName(baseDir) ?? "";
             if (baseDir.Length == 0) break;
         }
 
-        // Search the solution root (4 projects only — no heavy dirs) for the CLI exe
+        // 3. Scan repo root's bin/ dirs
         var root = FindRepoRoot();
         if (root != null)
         {
             foreach (var dir in Directory.EnumerateDirectories(root, "bin", SearchOption.AllDirectories))
             {
-                var probe = Path.Combine(dir, "OrbisPkgTool.exe");
-                if (File.Exists(probe)) { _cliPathBox.Text = probe; return probe; }
+                probe = Path.Combine(dir, "OrbisPkgTool.exe");
+                if (File.Exists(probe)) return probe;
             }
         }
         return null;
@@ -471,19 +359,46 @@ public sealed class MainForm : Form
         return null;
     }
 
+    // ------------------------------------------------------------------
+    // Settings persistence
+    // ------------------------------------------------------------------
     private void LoadSettings()
     {
         try
         {
-            if (File.Exists(_settingsPath))
+            if (!File.Exists(_settingsPath)) return;
+            var lines = File.ReadAllLines(_settingsPath);
+            var recents = new List<string>();
+            foreach (var l in lines)
             {
-                var lines = File.ReadAllLines(_settingsPath);
-                foreach (var l in lines)
+                if (l.StartsWith("pkg=", StringComparison.OrdinalIgnoreCase))
+                    _packageBar.SetPackagePath(l[4..]);
+                else if (l.StartsWith("passcode=", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (l.StartsWith("cli=", StringComparison.OrdinalIgnoreCase))
-                        _cliPathBox.Text = l[4..];
+                    var pc = l["passcode=".Length..];
+                    if (pc.Length == 32)
+                        _packageBar.SetPasscode(pc);
                 }
+                else if (l.StartsWith("recent", StringComparison.OrdinalIgnoreCase) && l.Contains('='))
+                    recents.Add(l[(l.IndexOf('=') + 1)..]);
+                else if (l.StartsWith("width=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[6..], out var w))
+                    _savedWidth = w;
+                else if (l.StartsWith("height=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[7..], out var h))
+                    _savedHeight = h;
+                else if (l.StartsWith("left=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[5..], out var lf))
+                    _savedLeft = lf;
+                else if (l.StartsWith("top=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[4..], out var tp))
+                    _savedTop = tp;
+                else if (l.StartsWith("pkgsplit=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[9..], out var ps))
+                    _savedPkgSplit = ps;
+                else if (l.StartsWith("toolsplit=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[10..], out var ts))
+                    _savedToolSplit = ts;
+                else if (l.StartsWith("outsplit=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[9..], out var os))
+                    _savedOutputSplit = os;
+                else if (l.StartsWith("tab=", StringComparison.OrdinalIgnoreCase) && int.TryParse(l[4..], out var tb2))
+                    _savedTab = tb2;
             }
+            _packageBar.SetRecents(recents);
         }
         catch { }
     }
@@ -492,27 +407,22 @@ public sealed class MainForm : Form
     {
         try
         {
-            File.WriteAllText(_settingsPath, $"cli={_cliPathBox.Text}\n");
+            var sb = new StringBuilder();
+            sb.Append("pkg=").AppendLine(_packageBar.PackagePath);
+            sb.Append("passcode=").AppendLine(_packageBar.Passcode);
+            foreach (var r in _packageBar.GetRecents())
+                sb.Append("recent=").AppendLine(r);
+            sb.Append("width=").AppendLine(Width.ToString());
+            sb.Append("height=").AppendLine(Height.ToString());
+            sb.Append("left=").AppendLine(Left.ToString());
+            sb.Append("top=").AppendLine(Top.ToString());
+            sb.Append("pkgsplit=").AppendLine(_pkgOps.Split.SplitterDistance.ToString());
+            sb.Append("toolsplit=").AppendLine(_toolOps.Split.SplitterDistance.ToString());
+            sb.Append("outsplit=").AppendLine(_outputSplit.SplitterDistance.ToString());
+            sb.Append("tab=").AppendLine(_tabControl.SelectedIndex.ToString());
+            File.WriteAllText(_settingsPath, sb.ToString());
         }
         catch { }
-    }
-
-    private void AppendLine(string text)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(() => AppendLine(text));
-            return;
-        }
-        _output.AppendText(text + Environment.NewLine);
-        _output.SelectionStart = _output.TextLength;
-        _output.ScrollToCaret();
-    }
-
-    private static TextBox? GetTextBoxOfFileRow(TableLayoutPanel panel)
-    {
-        if (panel.Controls.Count > 0 && panel.Controls[0] is TextBox tb) return tb;
-        return null;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -524,6 +434,7 @@ public sealed class MainForm : Form
             if (r != DialogResult.Yes) { e.Cancel = true; return; }
             try { _proc.Kill(entireProcessTree: true); } catch { }
         }
+        SaveSettings();
         base.OnFormClosing(e);
     }
 }
