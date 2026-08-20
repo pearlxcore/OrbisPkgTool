@@ -1,7 +1,7 @@
 namespace OrbisPkgTool.Gui;
 
 /// <summary>
-/// Complete registry of every OrbisPkgTool.Cli command, with the exact
+/// Complete registry of every OrbisPkgTool CLI command, with the exact
 /// option surface of each. Built from the CLI's Program.cs dispatch table.
 /// </summary>
 public static class CommandRegistry

@@ -2957,7 +2957,7 @@ static void DecryptSector(byte[] data, int offset, ulong sector, byte[] dataKey,
 static void PrintUsage()
 {
     Console.WriteLine(@"
-OrbisPkgTool.Cli : PS4 PKG command-line tool
+OrbisPkgTool : PS4 PKG command-line tool
   Default passcode: 00000000000000000000000000000000
 
   Commands:

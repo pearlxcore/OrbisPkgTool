@@ -71,8 +71,8 @@ public sealed class MainForm : Form
         {
             using var dlg = new OpenFileDialog
             {
-                Title = "Select OrbisPkgTool.Cli.exe",
-                Filter = "OrbisPkgTool CLI (*.exe)|OrbisPkgTool.Cli.exe|All files (*.*)|*.*",
+                Title = "Select OrbisPkgTool.exe",
+                Filter = "OrbisPkgTool CLI (*.exe)|OrbisPkgTool.exe|All files (*.*)|*.*",
             };
             if (dlg.ShowDialog(this) == DialogResult.OK) _cliPathBox.Text = dlg.FileName;
         };
@@ -316,7 +316,7 @@ public sealed class MainForm : Form
         if (exe == null)
         {
             MessageBox.Show(this,
-                "OrbisPkgTool.Cli.exe not found.\nSelect it with the \"...\" button next to CLI path.",
+                "OrbisPkgTool.exe not found.\nSelect it with the \"...\" button next to CLI path.",
                 "CLI not found", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -439,7 +439,7 @@ public sealed class MainForm : Form
         var baseDir = AppContext.BaseDirectory;
         for (int i = 0; i < 8; i++)
         {
-            var probe = Path.Combine(baseDir, "OrbisPkgTool.Cli.exe");
+            var probe = Path.Combine(baseDir, "OrbisPkgTool.exe");
             if (File.Exists(probe)) { _cliPathBox.Text = probe; return probe; }
             baseDir = Path.GetDirectoryName(baseDir) ?? "";
             if (baseDir.Length == 0) break;
@@ -451,7 +451,7 @@ public sealed class MainForm : Form
         {
             foreach (var dir in Directory.EnumerateDirectories(root, "bin", SearchOption.AllDirectories))
             {
-                var probe = Path.Combine(dir, "OrbisPkgTool.Cli.exe");
+                var probe = Path.Combine(dir, "OrbisPkgTool.exe");
                 if (File.Exists(probe)) { _cliPathBox.Text = probe; return probe; }
             }
         }

@@ -8,7 +8,7 @@ using OrbisPkgTool.Pkg;
 // step by step, logging every operation.  Run against original and rebuilt
 // PKGs to find exactly where the shadPS4 installer diverges.
 //
-// Usage: OrbisPkgTool.Cli.exe shadps4diag <pkg> [--passcode X]
+// Usage: OrbisPkgTool.exe shadps4diag <pkg> [--passcode X]
 
 namespace OrbisPkgTool;
 

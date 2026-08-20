@@ -49,7 +49,8 @@ OrbisPkgTool/                        class library (net10.0) — the core
                                      inspector → GP4 profile JSON
   Sfo/ParamSfo.cs                    param.sfo read/serialize
   Trp/Trp.cs                         trophy TRP pack read/create
-OrbisPkgTool.Cli/                    console harness — drop-in
+OrbisPkgTool/                        PKG/PFS/PFSC core library + CLI entry
+                                     point (Program.cs) — drop-in
                                      orbis-pub-cmd command syntax
 OrbisPkgTool.Gui/                    Windows Forms GUI
 OrbisPkgTool.Tests/                  23-test compatibility regression suite
@@ -92,35 +93,35 @@ Diagnostic:
 
 ```powershell
 # List every file + directory in a PKG:
-OrbisPkgTool.Cli.exe list game.pkg
+OrbisPkgTool.exe list game.pkg
 
 # Extract the whole package (Unicode paths work natively — no cmd.exe needed
 # when invoked through ProcessStartInfo, e.g. from another app or PowerShell):
-OrbisPkgTool.Cli.exe extract --passcode 00000000000000000000000000000000 game.pkg out/
+OrbisPkgTool.exe extract --passcode 00000000000000000000000000000000 game.pkg out/
 
 # Extract a single entry:
-OrbisPkgTool.Cli.exe extract game.pkg:Sc0/param.sfo out/
-OrbisPkgTool.Cli.exe extract game.pkg:Image0/eboot.bin out/
+OrbisPkgTool.exe extract game.pkg:Sc0/param.sfo out/
+OrbisPkgTool.exe extract game.pkg:Image0/eboot.bin out/
 
 # 8-stage structural validation (digests, keys, PFSC, PFS, signatures):
-OrbisPkgTool.Cli.exe validate --passcode 00000000000000000000000000000000 game.pkg
+OrbisPkgTool.exe validate --passcode 00000000000000000000000000000000 game.pkg
 
 # Generate a GP4 from an extracted dump:
-OrbisPkgTool.Cli.exe gp4gen ./Image0 --title "My Game" --title-id CUSA00001 --out game.gp4
+OrbisPkgTool.exe gp4gen ./Image0 --title "My Game" --title-id CUSA00001 --out game.gp4
 
 # Build a fake PKG (compression policy honored from GP4 pfs_compression):
-OrbisPkgTool.Cli.exe build game.gp4 ./Image0 --out game.pkg --passcode 00000000000000000000000000000000 --validate
+OrbisPkgTool.exe build game.gp4 ./Image0 --out game.pkg --passcode 00000000000000000000000000000000 --validate
 
 # One-shot repack — extract → restructure → gp4gen → build, with automatic
 # replay of the ORIGINAL's per-file compression policy (default --pfsc-mode
 # compressed). This is the recommended path for repacking scene FPKGs.
-OrbisPkgTool.Cli.exe repack original.pkg --out rebuilt.pkg
+OrbisPkgTool.exe repack original.pkg --out rebuilt.pkg
 
 # Inspect the original's PFSC compression profile, optionally save the
 # policy JSON for use with gp4gen --pfsc-profile, and diff against a
 # reference PKG:
-OrbisPkgTool.Cli.exe pfscprofile original.pkg --out pfsc_profile.json
-OrbisPkgTool.Cli.exe pfscprofile rebuilt.pkg --ref original.pkg
+OrbisPkgTool.exe pfscprofile original.pkg --out pfsc_profile.json
+OrbisPkgTool.exe pfscprofile rebuilt.pkg --ref original.pkg
 ```
 
 Default passcode: `00000000000000000000000000000000` (same as the native
