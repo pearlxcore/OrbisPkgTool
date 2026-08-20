@@ -893,5 +893,9 @@ public sealed class PkgReader : IDisposable
         : path.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase) ? path["Image0/".Length..]
         : path;
 
-    public void Dispose() => _stream.Dispose();
+    public void Dispose()
+    {
+        _innerPfs?.Dispose();
+        _stream.Dispose();
+    }
 }

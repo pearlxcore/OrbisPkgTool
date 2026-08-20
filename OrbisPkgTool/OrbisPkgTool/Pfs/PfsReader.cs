@@ -15,7 +15,7 @@ namespace OrbisPkgTool.Pfs;
 ///   next blocks        : flat path table, empty block
 ///   remaining blocks   : file/directory data
 /// </summary>
-public sealed class PfsReader
+public sealed class PfsReader : IDisposable
 {
     private const long BlockSize = 0x10000;
     private const int XtsSectorSize = 0x1000;
@@ -26,10 +26,24 @@ public sealed class PfsReader
     private readonly PfsInode[] _inodes;
     private readonly byte[]? _tweakKey;
     private readonly byte[]? _dataKey;
+    private readonly XtsTransforms? _xts; // cached transforms for the decrypt hot path
+    private bool _disposed;
 
     public PfsHeader Header => _header;
     public int InodeCount => _inodes.Length;
     public long PfsOffset => _pfsOffset;
+
+    /// <summary>
+    /// Releases the cached XTS transforms. The underlying stream is owned by
+    /// the caller and is NOT disposed here (see <see cref="Open"/>: the
+    /// BigEndianReader wraps a caller-owned stream).
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _xts?.Dispose();
+    }
 
     public PfsInode? GetInode(uint number) =>
         number < _inodes.Length ? _inodes[number] : null;
@@ -74,6 +88,7 @@ public sealed class PfsReader
         _inodes = inodes;
         _tweakKey = tweakKey;
         _dataKey = dataKey;
+        _xts = (dataKey != null && tweakKey != null) ? XtsTransforms.Create(dataKey, tweakKey) : null;
     }
 
     /// <summary>
@@ -304,12 +319,13 @@ public sealed class PfsReader
     public byte[] ReadBlock(int block)
     {
         byte[] data = _reader.ReadBytesAt(_pfsOffset + (long)block * BlockSize, (int)BlockSize);
-        if (_dataKey != null)
+        if (_xts != null)
         {
             for (int sector = block * 16; sector < block * 16 + 16; sector++)
             {
                 if (sector >= 16) // header block is never encrypted
-                    XtsDecryptSector(data, (sector - block * 16) * XtsSectorSize, (ulong)sector, _dataKey, _tweakKey!);
+                    XtsDecryptSector(data, (sector - block * 16) * XtsSectorSize, (ulong)sector,
+                        _xts.DataDecryptor, _xts.TweakEncryptor);
             }
         }
         return data;
@@ -412,6 +428,7 @@ public sealed class PfsReader
         var inodes = new PfsInode[(int)h.DinodeCount];
         byte[]? block = null;
         long blockIndex = -1;
+        using var xts = (dataKey != null && tweakKey != null) ? XtsTransforms.Create(dataKey, tweakKey) : null;
         for (long i = 0; i < h.DinodeCount; i++)
         {
             long inodeBlock = (pos - pfsOffset) / BlockSize;
@@ -420,12 +437,13 @@ public sealed class PfsReader
                 blockIndex = inodeBlock;
                 r.Position = pfsOffset + inodeBlock * BlockSize;
                 block = r.ReadBytes((int)BlockSize);
-                if (dataKey != null)
+                if (xts != null)
                 {
                     for (int sector = (int)(inodeBlock * 16); sector < (int)(inodeBlock * 16 + 16); sector++)
                     {
                         if (sector >= 16)
-                            XtsDecryptSector(block, (sector - (int)(inodeBlock * 16)) * XtsSectorSize, (ulong)sector, dataKey, tweakKey!);
+                            XtsDecryptSector(block, (sector - (int)(inodeBlock * 16)) * XtsSectorSize, (ulong)sector,
+                                xts.DataDecryptor, xts.TweakEncryptor);
                     }
                 }
             }
@@ -476,72 +494,125 @@ public sealed class PfsReader
     // ---- AES-XTS (IEEE 1679 / NIST SP 800-38E) ----
 
     /// <summary>
-    /// Decrypts one 0x1000-byte data unit in place. The tweak is the sector
-    /// index as a 128-bit little-endian integer, advanced per 16-byte block.
-    /// </summary>
-    /// <summary>
-    /// AES-XTS encryption of one 0x1000-byte data unit in place (the mirror of
-    /// <see cref="XtsDecryptSector"/>): C = E(P ^ T) ^ T with the same tweak
-    /// schedule and little-endian-first GF advance.
+    /// AES-XTS encryption of one 0x1000-byte data unit in place: C = E(P ^ T) ^ T,
+    /// with the sector index as 128-bit LE tweak, advanced per 16-byte block.
+    /// Creates its AES transforms per call — use the transform-accepting overload
+    /// in hot loops (16+ sectors per PFS block) to avoid the per-call setup.
     /// </summary>
     public static void XtsEncryptSector(byte[] data, int offset, ulong sector, byte[] dataKey, byte[] tweakKey)
     {
-        byte[] tweak = new byte[16];
-        for (int i = 0; i < 8; i++)
-            tweak[i] = (byte)(sector >> (8 * i));
-
         using var tweakAes = Aes.Create();
         tweakAes.Mode = CipherMode.ECB;
         tweakAes.Padding = PaddingMode.None;
         tweakAes.Key = tweakKey;
-        using (var enc = tweakAes.CreateEncryptor())
-            enc.TransformBlock(tweak, 0, 16, tweak, 0);
+        using var tweakEnc = tweakAes.CreateEncryptor();
 
         using var dataAes = Aes.Create();
         dataAes.Mode = CipherMode.ECB;
         dataAes.Padding = PaddingMode.None;
         dataAes.Key = dataKey;
-        using var encd = dataAes.CreateEncryptor();
-        var block = new byte[16];
-        for (int off = offset; off < offset + XtsSectorSize; off += 16)
-        {
-            for (int i = 0; i < 16; i++)
-                block[i] = (byte)(data[off + i] ^ tweak[i]);
-            encd.TransformBlock(block, 0, 16, block, 0);
-            for (int i = 0; i < 16; i++)
-                data[off + i] = (byte)(block[i] ^ tweak[i]);
-            GfMulByX(tweak);
-        }
+        using var dataEnc = dataAes.CreateEncryptor();
+
+        XtsEncryptSector(data, offset, sector, dataEnc, tweakEnc);
     }
 
+    /// <summary>
+    /// AES-XTS encryption of one 0x1000-byte data unit in place, using
+    /// caller-supplied ECB transforms (see <see cref="XtsTransforms.Create"/>).
+    ///
+    /// ECB has no inter-block feedback, so the per-block loop
+    /// C_i = E(P_i ^ T_i) ^ T_i is evaluated batched: build the full tweak
+    /// schedule T_0..T_255, XOR it over the sector, run ONE TransformBlock
+    /// across all 4096 bytes, XOR the schedule back. Byte-identical to the
+    /// classic per-block loop but ~2x faster (one interop transition per
+    /// sector instead of 256).
+    /// </summary>
+    public static void XtsEncryptSector(byte[] data, int offset, ulong sector,
+        ICryptoTransform dataEncryptor, ICryptoTransform tweakEncryptor)
+    {
+        byte[] tweak = MakeTweak(sector);
+        tweakEncryptor.TransformBlock(tweak, 0, 16, tweak, 0);
+        byte[] schedule = BuildTweakSchedule(tweak);
+
+        // XOR sector ^ schedule into scratch, one batched ECB pass, XOR back.
+        // (scratch avoids aliasing questions in TransformBlock.)
+        byte[] scratch = new byte[XtsSectorSize];
+        for (int i = 0; i < XtsSectorSize; i++)
+            scratch[i] = (byte)(data[offset + i] ^ schedule[i]);
+        dataEncryptor.TransformBlock(scratch, 0, XtsSectorSize, scratch, 0);
+        for (int i = 0; i < XtsSectorSize; i++)
+            data[offset + i] = (byte)(scratch[i] ^ schedule[i]);
+    }
+
+    /// <summary>
+    /// Decrypts one 0x1000-byte data unit in place. The tweak is the sector
+    /// index as a 128-bit little-endian integer, advanced per 16-byte block.
+    /// Creates its AES transforms per call — use the transform-accepting overload
+    /// in hot loops.
+    /// </summary>
     public static void XtsDecryptSector(byte[] data, int offset, ulong sector, byte[] dataKey, byte[] tweakKey)
     {
-        byte[] tweak = new byte[16];
-        for (int i = 0; i < 8; i++)
-            tweak[i] = (byte)(sector >> (8 * i));
-
         using var tweakAes = Aes.Create();
         tweakAes.Mode = CipherMode.ECB;
         tweakAes.Padding = PaddingMode.None;
         tweakAes.Key = tweakKey;
-        using (var enc = tweakAes.CreateEncryptor())
-            enc.TransformBlock(tweak, 0, 16, tweak, 0);
+        using var tweakEnc = tweakAes.CreateEncryptor();
 
         using var dataAes = Aes.Create();
         dataAes.Mode = CipherMode.ECB;
         dataAes.Padding = PaddingMode.None;
         dataAes.Key = dataKey;
-        using var dec = dataAes.CreateDecryptor();
-        var block = new byte[16];
-        for (int off = offset; off < offset + XtsSectorSize; off += 16)
+        using var dataDec = dataAes.CreateDecryptor();
+
+        XtsDecryptSector(data, offset, sector, dataDec, tweakEnc);
+    }
+
+    /// <summary>
+    /// AES-XTS decryption of one 0x1000-byte data unit in place, using
+    /// caller-supplied ECB transforms (see <see cref="XtsTransforms.Create"/>).
+    /// Batched for the same reason as the encrypt overload — see the remarks
+    /// on <see cref="XtsEncryptSector(byte[],int,ulong,ICryptoTransform,ICryptoTransform)"/>.
+    /// </summary>
+    public static void XtsDecryptSector(byte[] data, int offset, ulong sector,
+        ICryptoTransform dataDecryptor, ICryptoTransform tweakEncryptor)
+    {
+        byte[] tweak = MakeTweak(sector);
+        tweakEncryptor.TransformBlock(tweak, 0, 16, tweak, 0);
+        byte[] schedule = BuildTweakSchedule(tweak);
+
+        byte[] scratch = new byte[XtsSectorSize];
+        for (int i = 0; i < XtsSectorSize; i++)
+            scratch[i] = (byte)(data[offset + i] ^ schedule[i]);
+        dataDecryptor.TransformBlock(scratch, 0, XtsSectorSize, scratch, 0);
+        for (int i = 0; i < XtsSectorSize; i++)
+            data[offset + i] = (byte)(scratch[i] ^ schedule[i]);
+    }
+
+    /// <summary>
+    /// The raw 16-byte tweak for a sector: the sector index as a
+    /// little-endian 128-bit integer.
+    /// </summary>
+    private static byte[] MakeTweak(ulong sector)
+    {
+        var tweak = new byte[16];
+        for (int i = 0; i < 8; i++)
+            tweak[i] = (byte)(sector >> (8 * i));
+        return tweak;
+    }
+
+    /// <summary>
+    /// Expands the encrypted tweak into the full 0x1000-byte schedule
+    /// T_0 || T_1 || ... || T_255 by repeatedly multiplying by x (GF(2^128)).
+    /// </summary>
+    private static byte[] BuildTweakSchedule(byte[] tweak)
+    {
+        var schedule = new byte[XtsSectorSize];
+        for (int blk = 0; blk < XtsSectorSize / 16; blk++)
         {
-            for (int i = 0; i < 16; i++)
-                block[i] = (byte)(data[off + i] ^ tweak[i]);
-            dec.TransformBlock(block, 0, 16, block, 0);
-            for (int i = 0; i < 16; i++)
-                data[off + i] = (byte)(block[i] ^ tweak[i]);
+            Buffer.BlockCopy(tweak, 0, schedule, blk * 16, 16);
             GfMulByX(tweak);
         }
+        return schedule;
     }
 
     /// <summary>
@@ -647,5 +718,53 @@ public sealed class PfsDirent
         InodeNumber = inodeNumber;
         Type = type;
         Name = name;
+    }
+}
+
+/// <summary>
+/// Holds the three AES-ECB transforms needed for XTS encrypt/decrypt of an
+/// entire PFS image: the tweak encryptor (always encryption of the raw sector
+/// number), plus the data encryptor and data decryptor for the caller's
+/// direction. Create once per PFS reader/writer and pass to the batched
+/// <c>XtsEncryptSector</c>/<c>XtsDecryptSector</c> overloads.
+/// </summary>
+public sealed class XtsTransforms : IDisposable
+{
+    public readonly ICryptoTransform DataEncryptor;
+    public readonly ICryptoTransform DataDecryptor;
+    public readonly ICryptoTransform TweakEncryptor;
+
+    private XtsTransforms(ICryptoTransform enc, ICryptoTransform dec, ICryptoTransform tweak)
+    {
+        DataEncryptor = enc;
+        DataDecryptor = dec;
+        TweakEncryptor = tweak;
+    }
+
+    /// <summary>Creates a bundle for the given data/tweak key pair.</summary>
+    public static XtsTransforms Create(byte[] dataKey, byte[] tweakKey)
+    {
+        using var tweakAes = Aes.Create();
+        tweakAes.Mode = CipherMode.ECB;
+        tweakAes.Padding = PaddingMode.None;
+        tweakAes.Key = tweakKey;
+
+        using var dataAes = Aes.Create();
+        dataAes.Mode = CipherMode.ECB;
+        dataAes.Padding = PaddingMode.None;
+        dataAes.Key = dataKey;
+
+        // Transforms copy the key material — the Aes objects can be released.
+        return new XtsTransforms(
+            dataAes.CreateEncryptor(),
+            dataAes.CreateDecryptor(),
+            tweakAes.CreateEncryptor());
+    }
+
+    public void Dispose()
+    {
+        DataEncryptor.Dispose();
+        DataDecryptor.Dispose();
+        TweakEncryptor.Dispose();
     }
 }

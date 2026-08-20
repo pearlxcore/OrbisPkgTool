@@ -561,11 +561,13 @@ public static class PfsWriter
         var (tweakKey, dataKey) = PfsReader.DeriveXtsKeys(
             new PfsHeader { Mode = PfsMode.Signed | PfsMode.Encrypted | PfsMode.UnknownFlagAlwaysSet, Seed = seed },
             ekpfs);
+        using var xts = XtsTransforms.Create(dataKey!, tweakKey!);
         for (int sector = 16; sector < ndblock * 16; sector++)
         {
             if (sector >= emptyBlock * 16 && sector < (emptyBlock + 1) * 16)
                 continue; // the empty block is stored plaintext
-            PfsReader.XtsEncryptSector(image, sector * XtsSectorSize, (ulong)sector, dataKey!, tweakKey!);
+            PfsReader.XtsEncryptSector(image, sector * XtsSectorSize, (ulong)sector,
+                xts.DataEncryptor, xts.TweakEncryptor);
         }
         return image;
     }
@@ -672,6 +674,7 @@ public static class PfsWriter
         var (tweakKey, dataKey) = PfsReader.DeriveXtsKeys(
             new PfsHeader { Mode = PfsMode.Signed | PfsMode.Encrypted | PfsMode.UnknownFlagAlwaysSet, Seed = seed },
             ekpfs);
+        using var xts = XtsTransforms.Create(dataKey!, tweakKey!);
         var sector = new byte[XtsSectorSize];
         long totalSectors = (ndblock - 1) * 16;
         long sectorDone = 0;
@@ -682,7 +685,7 @@ public static class PfsWriter
             if (blk == emptyBlock) continue; // empty block stays plaintext
             output.Position = s * XtsSectorSize;
             output.Read(sector, 0, XtsSectorSize);
-            PfsReader.XtsEncryptSector(sector, 0, (ulong)s, dataKey!, tweakKey!);
+            PfsReader.XtsEncryptSector(sector, 0, (ulong)s, xts.DataEncryptor, xts.TweakEncryptor);
             output.Position = s * XtsSectorSize;
             output.Write(sector, 0, XtsSectorSize);
             sectorDone++;
