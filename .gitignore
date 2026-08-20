@@ -13,14 +13,10 @@ ghidra_12.1.2_PUBLIC/
 PS4_Fake_PKG_Tools_3.87_V7/
 LibOrbisPkg.v0.2/
 
-# Cross-validation artifacts
-CrossValidation/Results/*
-CrossValidation/Work/*
-!CrossValidation/Results/.gitkeep
-CrossValidation/config.json
-CrossValidation/lib/*.dll
-CrossValidation/OpenOrbisDriver/bin/
-CrossValidation/OpenOrbisDriver/obj/
+# Cross-validation harness (untracked)
+/CrossValidation/
 
+# Documentation (untracked)
+/docs/
 
 digimon_work/
