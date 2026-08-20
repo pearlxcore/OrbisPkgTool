@@ -80,11 +80,16 @@ public static class CommandRegistry
             Name = "validate", Group = "Inspect", Title = "Structured 8-stage validation",
             Description = "Structured 8-stage validation of a PKG (header/entries/outer PFS/PFSC/inner PFS/digests/signatures).",
             CliWord = "validate",
-            Fields = [],
+            Fields = [new CommandField
+            {
+                Id = "fakeTolerant", Label = "Fake-PKG tolerant (zeroed digests warn, not fail)",
+                Kind = FieldKind.Check,
+            }],
             BuildArgs = f =>
             {
                 var a = new List<string>();
                 if (f["passcode"] is { Length: > 0 } p) { a.Add("--passcode"); a.Add(p); }
+                if (f["fakeTolerant"] == "1") a.Add("--fake-tolerant");
                 a.Add(f["pkg"]);
                 return a.ToArray();
             },

@@ -19,6 +19,24 @@ public sealed class ValidationFailure : Exception
 }
 
 /// <summary>
+/// Non-fatal validation notice. In <see cref="ValidationOptions.FakeTolerant"/> mode,
+/// all-zero stored digests/signatures (typical of fake PKGs) produce warnings instead
+/// of throwing <see cref="ValidationFailure"/>.
+/// </summary>
+public readonly record struct ValidationWarning(string Stage, string Structure, string Offset, string Reason);
+
+/// <summary>Options controlling <see cref="PkgValidator"/> behavior.</summary>
+public sealed class ValidationOptions
+{
+    /// <summary>
+    /// When true, all-zero stored digests and signatures are reported as warnings
+    /// (via the <i>warnings</i> callback) instead of throwing. Non-zero but mismatched
+    /// values still hard-fail. Default: false (strict — every mismatch throws).
+    /// </summary>
+    public bool FakeTolerant { get; init; }
+}
+
+/// <summary>
 /// Structured validation of a built PKG (the 8-stage check used by
 /// `--validate` and by the regression suite). All checks are read-only;
 /// none of them re-derive format rules — they verify the invariants that
@@ -32,6 +50,16 @@ public static class PkgValidator
     /// </summary>
     public static void ValidatePkgFile(string pkgPath, string passcode,
         Action<string, string>? report = null)
+        => ValidatePkgFile(pkgPath, passcode, new ValidationOptions(), report, null);
+
+    /// <summary>
+    /// Runs the full 8-stage validation with explicit options. In fake-tolerant mode,
+    /// all-zero stored digests/signatures emit warnings (via <paramref name="warnings"/>)
+    /// instead of throwing; non-zero mismatches still throw.
+    /// </summary>
+    public static void ValidatePkgFile(string pkgPath, string passcode,
+        ValidationOptions options, Action<string, string>? report = null,
+        Action<ValidationWarning>? warnings = null)
     {
         // ---- Stage 1: package header + entry table ----
         report?.Invoke("1", "package header + entry table");
@@ -94,11 +122,11 @@ public static class PkgValidator
 
         // ---- Stage 5: digests ----
         report?.Invoke("5", "digests");
-        ValidateDigests(pkgPath, reader);
+        ValidateDigests(pkgPath, reader, options, warnings);
 
         // ---- Stage 6: outer PFS signatures ----
         report?.Invoke("6", "outer PFS signatures");
-        ValidateOuterSigs(pkgPath, reader, outer);
+        ValidateOuterSigs(pkgPath, reader, outer, options, warnings);
 
         // ---- Stage 7: final structural re-open (filesystem walk) ----
         report?.Invoke("7", "filesystem walk");
@@ -233,6 +261,11 @@ public static class PkgValidator
 
     /// <summary>Recomputes every header digest and compares with the stored values.</summary>
     public static void ValidateDigests(string pkgPath, PkgReader reader)
+        => ValidateDigests(pkgPath, reader, new ValidationOptions(), null);
+
+    /// <summary>Recomputes every header digest and compares with the stored values.</summary>
+    public static void ValidateDigests(string pkgPath, PkgReader reader,
+        ValidationOptions options, Action<ValidationWarning>? warnings)
     {
         var head = new byte[0x1000];
         using (var fs = File.OpenRead(pkgPath))
@@ -245,9 +278,9 @@ public static class PkgValidator
         byte[] h1 = HashEntryChain(reader, new[] { PkgEntryIds.EntryKeys, PkgEntryIds.ImageKey, PkgEntryIds.GeneralDigests, PkgEntryIds.Metas, PkgEntryIds.Digests });
         // sc_entries2_hash: entrykeys|imagekey|gd|metas[6 entries]
         byte[] h2 = HashEntryChain(reader, new[] { PkgEntryIds.EntryKeys, PkgEntryIds.ImageKey, PkgEntryIds.GeneralDigests, PkgEntryIds.Metas }, metasBytes: 6 * PkgEntry.Size);
-        Check32(head, 0x100, h1, "sc_entries1_hash");
-        Check32(head, 0x120, h2, "sc_entries2_hash");
-        Check32(head, 0x140, PkgCrypto.Sha256(ReadEntryBytes(reader, PkgEntryIds.Digests)), "digest_table_hash");
+        Check32(head, 0x100, h1, "sc_entries1_hash", options, warnings);
+        Check32(head, 0x120, h2, "sc_entries2_hash", options, warnings);
+        Check32(head, 0x140, PkgCrypto.Sha256(ReadEntryBytes(reader, PkgEntryIds.Digests)), "digest_table_hash", options, warnings);
 
         // body digest: pkg[0x2000 .. pfsOff)
         using (var sha = System.Security.Cryptography.SHA256.Create())
@@ -264,7 +297,7 @@ public static class PkgValidator
                 remaining -= c;
             }
             sha.TransformFinalBlock([], 0, 0);
-            Check32(head, 0x160, sha.Hash!, "body_digest");
+            Check32(head, 0x160, sha.Hash!, "body_digest", options, warnings);
         }
 
         // pfs digests (streamed)
@@ -276,7 +309,7 @@ public static class PkgValidator
             int c;
             while ((c = fs.Read(buf, 0, buf.Length)) > 0) sha.TransformBlock(buf, 0, c, null, 0);
             sha.TransformFinalBlock([], 0, 0);
-            Check32(head, 0x440, sha.Hash!, "pfs_image_digest");
+            Check32(head, 0x440, sha.Hash!, "pfs_image_digest", options, warnings);
         }
         using (var sha = System.Security.Cryptography.SHA256.Create())
         using (var fs = File.OpenRead(pkgPath))
@@ -286,15 +319,20 @@ public static class PkgValidator
             int c = fs.Read(buf, 0, buf.Length);
             if (c < buf.Length) Array.Resize(ref buf, c);
             sha.TransformFinalBlock(buf, 0, buf.Length);
-            Check32(head, 0x460, sha.Hash!, "pfs_signed_digest");
+            Check32(head, 0x460, sha.Hash!, "pfs_signed_digest", options, warnings);
         }
 
         // header digest: sha256(header[0..0xFE0]) stored at 0xFE0
-        Check32(head, 0xFE0, PkgCrypto.Sha256(head.AsSpan(0, 0xFE0).ToArray()), "header_digest");
+        Check32(head, 0xFE0, PkgCrypto.Sha256(head.AsSpan(0, 0xFE0).ToArray()), "header_digest", options, warnings);
     }
 
     /// <summary>Verifies the outer PFS HMAC block signatures (signKey scheme, XTS-decrypted).</summary>
     public static void ValidateOuterSigs(string pkgPath, PkgReader reader, PfsReader outer)
+        => ValidateOuterSigs(pkgPath, reader, outer, new ValidationOptions(), null);
+
+    /// <summary>Verifies the outer PFS HMAC block signatures (signKey scheme, XTS-decrypted).</summary>
+    public static void ValidateOuterSigs(string pkgPath, PkgReader reader, PfsReader outer,
+        ValidationOptions options, Action<ValidationWarning>? warnings)
     {
         var ekpfs = reader.Ekpfs ?? throw new ValidationFailure("sigs", "ekpfs", "-", "no EKPFS");
         long pfsOff = (long)reader.Header.PfsImageOffset;
@@ -327,7 +365,7 @@ public static class PkgValidator
                 throw new ValidationFailure("sigs", what, $"slot 0x{slot:X}", "slot outside inode table");
             var stored = tbl.AsSpan((int)tblOff, 32);
             if (!expected.AsSpan().SequenceEqual(stored))
-                throw new ValidationFailure("sigs", what, $"slot 0x{slot:X}", "signature mismatch");
+                CheckSig(what, $"slot 0x{slot:X}", stored.ToArray(), expected, options, warnings);
         }
 
         long ino0 = PfsFormat.BlockSize;
@@ -353,7 +391,7 @@ public static class PkgValidator
             byte[] stored = ReadAt(pkgPath, pfsOff + PfsFormat.HeaderDinodeOffset + 0x68, 32);
             var calc = ContentHmac(PfsFormat.BlockSize, (int)PfsFormat.BlockSize);
             if (!calc.AsSpan().SequenceEqual(stored))
-                throw new ValidationFailure("sigs", "hdr dinode db[0]", "0x50+0x68", "signature mismatch");
+                CheckSig("hdr dinode db[0]", "0x50+0x68", stored, calc, options, warnings);
         }
         // header block sig at 0x380 covering header[0..0x5A0]
         {
@@ -362,11 +400,52 @@ public static class PkgValidator
             for (int i = 0x380; i < 0x380 + 32; i++) hdrBlock[i] = 0;
             var calc = PkgCrypto.HmacSha256(signKey, hdrBlock);
             if (!calc.AsSpan().SequenceEqual(stored))
-                throw new ValidationFailure("sigs", "header", "0x380", "header block signature mismatch");
+                CheckSig("header", "0x380", stored, calc, options, warnings);
         }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
+
+    private static bool IsAllZero(byte[] b) => b is { Length: > 0 } && b.AsSpan().IndexOfAnyExcept((byte)0) < 0;
+
+    /// <summary>
+    /// Checks a 32-byte digest slot. In strict mode any mismatch throws.
+    /// In fake-tolerant mode, all-zero stored value emits a warning instead;
+    /// non-zero mismatch still throws (real corruption).
+    /// </summary>
+    private static void Check32(byte[] head, int off, byte[] calc, string what,
+        ValidationOptions options, Action<ValidationWarning>? warnings)
+    {
+        var stored = head.AsSpan(off, 32);
+        if (stored.SequenceEqual(calc)) return;                  // match — OK
+        if (options.FakeTolerant && IsAllZero(stored.ToArray()))
+        {
+            warnings?.Invoke(new ValidationWarning("digests", what, $"0x{off:X}",
+                "stored digest is all-zero — typical for fake PKGs (scene tools omit real signatures)"));
+            return;
+        }
+        throw new ValidationFailure("digests", what, $"0x{off:X}",
+            $"stored {Convert.ToHexString(stored)} != computed {Convert.ToHexString(calc)}");
+    }
+
+    /// <summary>
+    /// Checks a 32-byte HMAC signature slot. In strict mode any mismatch throws.
+    /// In fake-tolerant mode, all-zero stored value emits a warning instead;
+    /// non-zero mismatch still throws (real corruption).
+    /// </summary>
+    private static void CheckSig(string what, string offset, byte[] stored, byte[] calc,
+        ValidationOptions options, Action<ValidationWarning>? warnings)
+    {
+        if (stored.AsSpan().SequenceEqual(calc)) return;         // match — OK
+        if (options.FakeTolerant && IsAllZero(stored))
+        {
+            warnings?.Invoke(new ValidationWarning("sigs", what, offset,
+                "stored signature is all-zero — typical for fake PKGs (scene tools omit real signatures)"));
+            return;
+        }
+        throw new ValidationFailure("sigs", what, offset,
+            $"stored {Convert.ToHexString(stored)} != computed {Convert.ToHexString(calc)}");
+    }
 
     private static byte[] ReadEntryBytes(PkgReader reader, uint id)
     {
@@ -392,13 +471,6 @@ public static class PkgValidator
             ms.Write(buf, 0, len);
         }
         return PkgCrypto.Sha256(ms.ToArray());
-    }
-
-    private static void Check32(byte[] head, int off, byte[] calc, string what)
-    {
-        if (!calc.AsSpan().SequenceEqual(head.AsSpan(off, 32)))
-            throw new ValidationFailure("digests", what, $"0x{off:X}",
-                $"stored {Convert.ToHexString(head.AsSpan(off, 32))} != computed {Convert.ToHexString(calc)}");
     }
 
     private static Stream OpenPfsImageDat(string pkgPath, PkgReader reader)

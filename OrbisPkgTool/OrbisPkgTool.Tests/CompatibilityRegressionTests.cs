@@ -975,4 +975,64 @@ public class CompatibilityRegressionTests : IDisposable
         foreach (var f in files)
             Assert.True(f.Inode != null, $"entry {f.Path} has no cached inode");
     }
+
+    // ── 26. Fake-tolerant validation: zeroed digests warn instead of fail ──
+
+    [Fact]
+    public void FakeTolerant_ZeroedDigests_WarnInsteadOfFail()
+    {
+        var (gp4, img) = MakeFixture("faketol",
+            ("a.bin", Data(64)), ("dir/b.bin", Data(128)));
+        string pkg = Build(gp4, img, "faketol.pkg");
+
+        // Strict mode passes on a genuine build.
+        PkgValidator.ValidatePkgFile(pkg, Passcode);
+
+        // Simulate a scene FPKG: zero the pfs digests (0x440, 0x460) and
+        // recompute the header digest (0xFE0), as scene tools do.
+        var head = new byte[0x1000];
+        using (var fs = File.OpenRead(pkg))
+            fs.ReadExactly(head, 0, 0x1000);
+        Array.Clear(head, 0x440, 32);
+        Array.Clear(head, 0x460, 32);
+        PkgCrypto.Sha256(head.AsSpan(0, 0xFE0).ToArray()).CopyTo(head.AsSpan(0xFE0, 32));
+        using (var fs = File.OpenWrite(pkg))
+            fs.Write(head, 0, 0x1000);
+
+        // Strict mode now fails on the zeroed pfs_image_digest.
+        Assert.Throws<ValidationFailure>(() =>
+            PkgValidator.ValidatePkgFile(pkg, Passcode));
+
+        // Fake-tolerant mode passes with warnings for both zeroed digests.
+        var warnings = new List<ValidationWarning>();
+        PkgValidator.ValidatePkgFile(pkg, Passcode,
+            new ValidationOptions { FakeTolerant = true }, null, w => warnings.Add(w));
+        Assert.Contains(warnings, w => w.Structure == "pfs_image_digest");
+        Assert.Contains(warnings, w => w.Structure == "pfs_signed_digest");
+        Assert.Equal(2, warnings.Count);
+    }
+
+    // ── 27. Fake-tolerant validation: non-zero mismatch still hard-fails ──
+
+    [Fact]
+    public void FakeTolerant_NonZeroDigestMismatch_StillThrows()
+    {
+        var (gp4, img) = MakeFixture("faketol2", ("a.bin", Data(64)));
+        string pkg = Build(gp4, img, "faketol2.pkg");
+
+        // Corrupt 0x440 with non-zero garbage — tolerant mode must still fail
+        // (all-zero is "scene fake", non-zero mismatch is real corruption).
+        var head = new byte[0x1000];
+        using (var fs = File.OpenRead(pkg))
+            fs.ReadExactly(head, 0, 0x1000);
+        for (int i = 0; i < 32; i++) head[0x440 + i] = (byte)(i + 1);
+        using (var fs = File.OpenWrite(pkg))
+            fs.Write(head, 0, 0x1000);
+
+        var vf = Assert.Throws<ValidationFailure>(() =>
+            PkgValidator.ValidatePkgFile(pkg, Passcode,
+                new ValidationOptions { FakeTolerant = true }, null, null));
+        Assert.Equal("digests", vf.Stage);
+        Assert.Equal("pfs_image_digest", vf.Structure);
+    }
 }

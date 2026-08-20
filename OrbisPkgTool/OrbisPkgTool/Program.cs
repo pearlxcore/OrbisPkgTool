@@ -56,7 +56,7 @@ try
             break;
         case "validate":
             var vp = ParseOptions(cmdArgs, out _);
-            RunValidate(vp.Pkg, vp.Passcode);
+            RunValidate(vp.Pkg, vp.Passcode, cmdArgs.Contains("--fake-tolerant"));
             break;
         case "entries":
             RunEntries(ParseOptions(cmdArgs, out _).Pkg);
@@ -1630,13 +1630,23 @@ static uint ParseHexU32(string s)
 }
 
 /// <summary>Structured 8-stage validation of a built PKG ("validate" / "--validate").</summary>
-static void RunValidate(string pkgPath, string passcode)
+static void RunValidate(string pkgPath, string passcode, bool fakeTolerant = false)
 {
+    var options = new OrbisPkgTool.Pkg.ValidationOptions { FakeTolerant = fakeTolerant };
+    var warnings = new System.Collections.Generic.List<OrbisPkgTool.Pkg.ValidationWarning>();
     try
     {
-        OrbisPkgTool.Pkg.PkgValidator.ValidatePkgFile(pkgPath, passcode,
-            (stage, what) => Console.WriteLine($"  [{stage}/8] Validating {what}"));
-        Console.WriteLine("Validation: PASS");
+        OrbisPkgTool.Pkg.PkgValidator.ValidatePkgFile(pkgPath, passcode, options,
+            (stage, what) => Console.WriteLine($"  [{stage}/8] Validating {what}"),
+            fakeTolerant ? w => warnings.Add(w) : null);
+        if (warnings.Count > 0)
+        {
+            foreach (var w in warnings)
+                Console.WriteLine($"  [warn] {w.Stage} {w.Structure} @{w.Offset}: {w.Reason}");
+            Console.WriteLine($"Validation: PASS (with {warnings.Count} warning(s))");
+        }
+        else
+            Console.WriteLine("Validation: PASS");
     }
     catch (OrbisPkgTool.Pkg.ValidationFailure vf)
     {
@@ -2967,6 +2977,7 @@ OrbisPkgTool : PS4 PKG command-line tool
     info        : Show PKG metadata
     inspect     : Full PFS tree dump
     validate    : 8-stage structural validation
+                  (--fake-tolerant: warn on zeroed digests, scene-FPKG compatible)
     build       : Build a fake PKG from GP4        (build -h for details)
     orbis-build : Build a fake PKG using orbis-pub-cmd
     repack      : Extract + restructure + gp4gen + build (one-shot)
@@ -3067,6 +3078,22 @@ gp4gen : Scan a folder and generate a GP4 project file
 
   Example:
     gp4gen ./game --title ""My Game"" --title-id CUSA00001 --out game.gp4
+"); break;
+        case "validate":
+            h.WriteLine(@"
+validate : 8-stage structural validation of a built PKG
+
+  Usage:
+    validate [--passcode <32ch>] [--fake-tolerant] <pkg>
+
+  Options:
+    --fake-tolerant   Treat all-zero stored digests/signatures as warnings
+                      instead of failures (scene FPKGs omit real signatures).
+                      Non-zero mismatches still hard-fail.
+
+  Examples:
+    validate game.pkg
+    validate --fake-tolerant --passcode 00000000000000000000000000000000 game.pkg
 "); break;
         case "sweep":
             h.WriteLine(@"
