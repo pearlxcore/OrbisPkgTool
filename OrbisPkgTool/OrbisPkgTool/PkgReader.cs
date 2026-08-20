@@ -332,6 +332,7 @@ public sealed class PkgReader : IDisposable
                     Name = d.Name,
                     IsDirectory = true,
                     IsEncrypted = false,
+                    Inode = ino,
                 });
                 WalkPfsTree(pfs, ino, path, result, visited);
                 visited.Remove(d.InodeNumber);
@@ -348,6 +349,7 @@ public sealed class PkgReader : IDisposable
                     IsDirectory = false,
                     IsEncrypted = false,
                     Offset = ino.StartBlock > 0 ? pfs.PfsOffset + ino.StartBlock * 0x10000L : 0,
+                    Inode = ino,
                 });
             }
         }
@@ -438,7 +440,7 @@ public sealed class PkgReader : IDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 if (f.Path.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase))
                 {
-                    ExtractImage0FileTo(f.Path, dest);
+                    ExtractImage0FileTo(f.Path, dest, f.Inode);
                 }
                 else
                 {
@@ -464,12 +466,17 @@ public sealed class PkgReader : IDisposable
         return failures;
     }
 
-    private void ExtractImage0FileTo(string entryPath, string destPath)
+    private void ExtractImage0FileTo(string entryPath, string destPath, Pfs.PfsInode? cachedInode = null)
     {
         entryPath = NormalizeEntryPath(entryPath);
         var inner = OpenInnerPfs() ?? throw new FileNotFoundException($"Entry not found: {entryPath}");
-        var node = inner.FindFile(entryPath["Image0/".Length..])
-            ?? throw new FileNotFoundException($"Entry not found: {entryPath}");
+        // Reuse the inode carried by the tree walk when available — avoids
+        // re-resolving the path through the dirent chain (O(depth) reads
+        // per file, each potentially re-decompressing PFSC blocks beyond
+        // the 64-block metadata cache).
+        var node = cachedInode ?? inner.FindFile(entryPath["Image0/".Length..]);
+        if (node == null)
+            throw new FileNotFoundException($"Entry not found: {entryPath}");
         // Stream large files directly to disk, small files via memory
         if (node.Size > 512 * 1024 * 1024) // 512 MB threshold
         {
@@ -803,10 +810,10 @@ public sealed class PkgReader : IDisposable
             files = files.Where(f => !f.IsDirectory).ToList();
             foreach (var f in files)
             {
-                string rel = Unprefix(f.Path);
                 string dest = SanitizeExtractPath(outputDirectory, f.Path);
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                var fileIno = inner.FindFile(rel)!;
+                // f.Inode was carried by WalkPfsTree — no FindFile re-resolution.
+                var fileIno = f.Inode ?? inner.FindFile(Unprefix(f.Path))!;
                 if (fileIno.Size > int.MaxValue) {
                     // Large file — stream to disk
                     using var src = inner.OpenFileStream(fileIno);

@@ -411,15 +411,30 @@ public static class PFSCWriter
         return result;
     }
 
-    /// <summary>RFC1950 Adler-32 of the decompressed block (stored big-endian).</summary>
+    /// <summary>
+    /// RFC1950 Adler-32 of the decompressed block (stored big-endian).
+    /// Uses the NMAX=5552 batching from zlib's adler32.c: instead of taking
+    /// the modulo per byte, accumulate sums and reduce once per batch. For
+    /// a 64 KiB block this cuts ~65536 modulo ops to ~12.
+    /// </summary>
     private static uint Adler32(ReadOnlySpan<byte> data)
     {
         const uint Mod = 65521;
+        const int NMax = 5552; // largest N where 255 * (N * N + N) / 4 < 2^32
+
         uint a = 1, b = 0;
-        foreach (byte c in data)
+        int i = 0;
+        while (i < data.Length)
         {
-            a = (a + c) % Mod;
-            b = (b + a) % Mod;
+            int batch = Math.Min(NMax, data.Length - i);
+            for (int j = 0; j < batch; j++)
+            {
+                a += data[i + j];
+                b += a;
+            }
+            a %= Mod;
+            b %= Mod;
+            i += batch;
         }
         return (b << 16) | a;
     }

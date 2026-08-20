@@ -217,9 +217,11 @@ public static class PkgValidator
             throw new ValidationFailure("pfsc", "table", "last",
                 $"final table offset {prev} != PFSC size {pfscLen}");
 
-        // Full round-trip decompression.
+        // Full round-trip decompression — with Adler-32 trailer verification:
+        // .NET's deflate streams skip the checksum, so this is the only place
+        // corruption inside a compressed block gets caught.
         pfsc.Position = 0;
-        var stream = new PFSCStream(pfsc);
+        var stream = new PFSCStream(pfsc, verifyChecksums: true);
         long total = 0;
         var buf = new byte[PfsFormat.BlockSize];
         int n;

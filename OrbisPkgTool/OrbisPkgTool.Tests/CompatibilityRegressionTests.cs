@@ -858,4 +858,121 @@ public class CompatibilityRegressionTests : IDisposable
         Assert.True(File.Exists(pkg));
         Assert.False(File.Exists(pkg + ".tmp"));
     }
+
+    // ── 23. Adler32 NMAX batching: byte-identical to naive implementation ──
+
+    [Fact]
+    public void Adler32_NMaxBatching_MatchesNaiveImplementation()
+    {
+        // The NMAX-batched Adler32 must produce the same checksum as the
+        // naive per-byte-modulo reference for all block sizes (the batch
+        // boundary at 5552 bytes is the only behavioral difference).
+        var rnd = new Random(42);
+        // Test at sizes below, at, and above the NMAX boundary (5552).
+        int[] sizes = [0, 1, 100, 5551, 5552, 5553, 11104, 65536, 65537];
+        foreach (int len in sizes)
+        {
+            var data = new byte[len];
+            rnd.NextBytes(data);
+            uint expected = NaiveAdler32(data);
+            // Build a PFSC block via CompressBlock and verify the trailer.
+            var block = new byte[len];
+            Array.Copy(data, block, len);
+            var comp = PFSCWriter.CompressBlock(block, 0, len);
+            if (comp == null) continue; // incompressible — no trailer to check
+            // The trailer is the last 4 bytes, big-endian.
+            uint stored = ((uint)comp[^4] << 24) | ((uint)comp[^3] << 16)
+                | ((uint)comp[^2] << 8) | comp[^1];
+            Assert.Equal(expected, stored);
+        }
+    }
+
+    private static uint NaiveAdler32(byte[] data)
+    {
+        const uint Mod = 65521;
+        uint a = 1, b = 0;
+        foreach (byte c in data)
+        {
+            a = (a + c) % Mod;
+            b = (b + a) % Mod;
+        }
+        return (b << 16) | a;
+    }
+
+    // ── 24. PFSC trailer verification detects corruption ──
+
+    [Fact]
+    public void PfscVerifyChecksum_DetectsCorruption()
+    {
+        var inner = PfsWriter.BuildInnerPfs(
+            [("data.bin", Data(PfsFormat.BlockSize, 0x42))], 0);
+        var pfsc = PFSCWriter.Build(inner, storeAllRaw: false);
+
+        // Verify the valid image passes checksum verification.
+        using (var ms = new MemoryStream(pfsc, false))
+        {
+            using var stream = new PFSCStream(ms, verifyChecksums: true);
+            using var outMs = new MemoryStream();
+            stream.CopyTo(outMs);
+            Assert.Equal(Sha(inner), Sha(outMs.ToArray()));
+        }
+
+        // Corrupt one compressed block's data (not the trailer) — the
+        // decompressed bytes change, so the recomputed Adler32 won't match
+        // the stored trailer. Verification must catch it.
+        long dataOff = BitConverter.ToInt64(pfsc, 0x20);
+        // Flip a byte in the first compressed block (after the 2-byte zlib header).
+        if (pfsc[(int)dataOff + 2] == 0)
+            pfsc[(int)dataOff + 2] = 0xFF;
+        else
+            pfsc[(int)dataOff + 2] ^= 0xFF;
+
+        using (var ms2 = new MemoryStream(pfsc, false))
+        {
+            using var stream = new PFSCStream(ms2, verifyChecksums: true);
+            using var outMs = new MemoryStream();
+            // A corrupted deflate stream may throw during decompression
+            // (InvalidDataException) or produce wrong bytes caught by the
+            // Adler32 check — either is a valid detection.
+            Assert.ThrowsAny<Exception>(() => stream.CopyTo(outMs));
+        }
+    }
+
+    // ── 25. Inode-carrying WalkPfsTree: ExtractAll uses cached inodes ──
+
+    [Fact]
+    public void ExtractAll_InodeCarryingWalk_RoundTripsAllFiles()
+    {
+        // A nested tree exercises the O(files×depth) re-resolution path:
+        // before Phase 4.4, each file's extraction re-resolved its path
+        // through the dirent chain. The cached inode makes it O(1).
+        var (gp4, img) = MakeFixture("inode_walk",
+            ("dir1/a.bin", Data(3)),
+            ("dir1/b.bin", Data(5)),
+            ("dir1/sub/c.bin", Data(7)),
+            ("dir2/d.bin", Data(11)),
+            ("e.bin", Data(13)));
+        string pkg = Build(gp4, img, "inode.pkg");
+        PkgValidator.ValidatePkgFile(pkg, Passcode);
+
+        string outDir = NewDir("inode_out");
+        using var reader = new PkgReader(pkg, Passcode);
+        var failures = reader.ExtractAll(outDir, null, new ExtractAllOptions());
+        Assert.Empty(failures);
+
+        // Every file must round-trip byte-exact.
+        Assert.Equal(Data(3), File.ReadAllBytes(Path.Combine(outDir, "Image0", "dir1", "a.bin")));
+        Assert.Equal(Data(5), File.ReadAllBytes(Path.Combine(outDir, "Image0", "dir1", "b.bin")));
+        Assert.Equal(Data(7), File.ReadAllBytes(Path.Combine(outDir, "Image0", "dir1", "sub", "c.bin")));
+        Assert.Equal(Data(11), File.ReadAllBytes(Path.Combine(outDir, "Image0", "dir2", "d.bin")));
+        Assert.Equal(Data(13), File.ReadAllBytes(Path.Combine(outDir, "Image0", "e.bin")));
+
+        // The cached inode must also be present on listed Image0 entries
+        // (Sc0 entries live in the PKG entry table, not the PFS — no inode).
+        var files = reader.ListFiles()
+            .Where(f => !f.IsDirectory && f.Path.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var f in files)
+            Assert.True(f.Inode != null, $"entry {f.Path} has no cached inode");
+    }
 }

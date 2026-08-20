@@ -28,4 +28,15 @@ public sealed class PkgFileEntry
 
     /// <summary>Byte offset of the data in the PKG file (0 for synthesized directories).</summary>
     public long Offset { get; set; }
+
+    /// <summary>
+    /// The resolved PFS inode for Image0 entries — set during the tree walk
+    /// so extraction reuses it instead of re-resolving the path through the
+    /// dirent chain (O(1) instead of O(depth) per file, and dirent blocks
+    /// beyond the PFSC metadata cache no longer re-decompress per file).
+    /// Null for Sc0 entries and synthesized parent directories; callers
+    /// must fall back to FindFile. The inode belongs to the reader's cached
+    /// inner PFS and stays valid until the PkgReader is disposed.
+    /// </summary>
+    internal Pfs.PfsInode? Inode { get; set; }
 }

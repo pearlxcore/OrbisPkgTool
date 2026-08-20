@@ -513,20 +513,38 @@ public static class PkgBuilder
                 pkg.Write(e.Data, 0, e.Data.Length);
             }
 
-        // Outer PFS — stream copy
+        // Outer PFS — stream copy. Both PFS digests (hdr 0x440 = whole image,
+        // hdr 0x460 = first 64 KiB) are folded into this single pass —
+        // previously each digest re-opened and re-read the outer PFS file,
+        // so a 25 GB game read its PFS image three times total.
+        byte[] pfsImageDigest, pfsSignedDigest;
+        using (var pfsSha = System.Security.Cryptography.SHA256.Create())
+        using (var pfsHeadSha = System.Security.Cryptography.SHA256.Create())
         using (var outer = new FileStream(outerPfsPath, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             pkg.Position = pfsOffset;
             var copyBuf = new byte[1 << 20];
             long copied = 0;
+            long headRemaining = Math.Min(0x10000, outerSize);
             int cn;
             while ((cn = outer.Read(copyBuf, 0, copyBuf.Length)) > 0)
             {
                 ct.ThrowIfCancellationRequested();
                 pkg.Write(copyBuf, 0, cn);
+                pfsSha.TransformBlock(copyBuf, 0, cn, null, 0);
+                if (headRemaining > 0)
+                {
+                    int take = (int)Math.Min(cn, headRemaining);
+                    pfsHeadSha.TransformBlock(copyBuf, 0, take, null, 0);
+                    headRemaining -= take;
+                }
                 copied += cn;
                 progress?.Invoke(copied, outerSize);
             }
+            pfsSha.TransformFinalBlock([], 0, 0);
+            pfsHeadSha.TransformFinalBlock([], 0, 0);
+            pfsImageDigest = pfsSha.Hash!;
+            pfsSignedDigest = pfsHeadSha.Hash!;
         }
 
         // Header (0x1000) + RSA signature (0x1000..0x1100) — the in-memory
@@ -597,7 +615,10 @@ public static class PkgBuilder
         }
         Buffer.BlockCopy(PkgCrypto.Sha256(digestsEntry.Data), 0, hdr, 0x140, 32);
 
-        // body_digest: SHA256 of pkg[0x2000 .. pfsOffset)
+        // body_digest: SHA256 of pkg[0x2000 .. pfsOffset) — the entries are
+        // written in ID order, so re-read the region in byte order once (the
+        // region is entry data only, typically a few hundred KB, and hot in
+        // the OS file cache after the write pass).
         using (var sha = System.Security.Cryptography.SHA256.Create())
         {
             pkg.Position = BodyOffset;
@@ -615,30 +636,10 @@ public static class PkgBuilder
             Buffer.BlockCopy(sha.Hash!, 0, hdr, 0x160, 32);
         }
 
-        // pfs_image_digest / pfs_signed_digest: SHA256 of the outer PFS file
-        using (var sha = System.Security.Cryptography.SHA256.Create())
-        {
-            using (var outer = new FileStream(outerPfsPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                var buf = new byte[1 << 20];
-                int n;
-                while ((n = outer.Read(buf, 0, buf.Length)) > 0)
-                    sha.TransformBlock(buf, 0, n, null, 0);
-            }
-            sha.TransformFinalBlock([], 0, 0);
-            Buffer.BlockCopy(sha.Hash!, 0, hdr, 0x440, 32);
-        }
-        using (var sha = System.Security.Cryptography.SHA256.Create())
-        {
-            using (var outer = new FileStream(outerPfsPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                var buf = new byte[0x10000];
-                int n = outer.Read(buf, 0, buf.Length);
-                if (n < buf.Length) Array.Resize(ref buf, n);
-                sha.TransformFinalBlock(buf, 0, buf.Length);
-            }
-            Buffer.BlockCopy(sha.Hash!, 0, hdr, 0x460, 32);
-        }
+        // pfs_image_digest / pfs_signed_digest: computed during the outer PFS
+        // copy pass above (single read of the PFS image instead of three).
+        Buffer.BlockCopy(pfsImageDigest, 0, hdr, 0x440, 32);
+        Buffer.BlockCopy(pfsSignedDigest, 0, hdr, 0x460, 32);
 
         // Entry table + header (signature area still zero at this point)
         pkg.Position = TableOffset;

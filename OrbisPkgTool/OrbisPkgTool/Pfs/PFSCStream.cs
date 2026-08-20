@@ -58,11 +58,23 @@ public sealed class PFSCStream : Stream
     private readonly long _length;
     private long _position;
     private readonly byte[]?[] _cache;
+    private readonly bool _verifyChecksums;
     private const int MetaCacheSlots = 64; // cache first 64 blocks only (inode table + dirents)
 
-    public PFSCStream(Stream source)
+    /// <param name="verifyChecksums">
+    /// When true, every decompressed block's RFC1950 Adler-32 trailer is
+    /// checked against the recomputed checksum of the decompressed data.
+    /// .NET's ZLibStream/DeflateStream do NOT validate the checksum on read,
+    /// so without this a corrupted block decompresses into silently wrong
+    /// bytes. Off by default — third-party PFSC writers could carry quirky
+    /// trailers, and verification is a validation concern, not a read one.
+    /// Raw-stored blocks (compressedSize == blockSize) have no trailer and
+    /// are never checked.
+    /// </param>
+    public PFSCStream(Stream source, bool verifyChecksums = false)
     {
         _source = source;
+        _verifyChecksums = verifyChecksums;
         var headerBytes = new byte[PFSCHeader.HeaderSize];
         source.Position = 0;
         ReadFully(source, headerBytes);
@@ -171,9 +183,52 @@ public sealed class PFSCStream : Stream
         }
         if (read < expected)
             Array.Resize(ref output, read);
+
+        // Optional trailer check: the last 4 bytes of the compressed block are
+        // the big-endian Adler-32 of the DECOMPRESSED data (RFC1950). The .NET
+        // deflate streams never validate this, so a flipped bit decompresses
+        // silently wrong without this check.
+        if (_verifyChecksums && compressedSize >= 6)
+        {
+            uint stored = ((uint)compressed[compressedSize - 4] << 24)
+                | ((uint)compressed[compressedSize - 3] << 16)
+                | ((uint)compressed[compressedSize - 2] << 8)
+                | compressed[compressedSize - 1];
+            uint actual = Adler32(output);
+            if (stored != actual)
+                throw new InvalidDataException(
+                    $"PFSC block {index}: Adler-32 mismatch (stored 0x{stored:X8}, " +
+                    $"computed 0x{actual:X8}) — the PFSC image is corrupt.");
+        }
+
         // Only cache first 64 blocks (metadata: header, inodes, dirents)
         if (index < MetaCacheSlots) _cache[index] = output;
         return output;
+    }
+
+    /// <summary>
+    /// RFC1950 Adler-32 (big-endian trailer value) with NMAX batching —
+    /// see PFSCWriter.Adler32 for the algorithm reference.
+    /// </summary>
+    private static uint Adler32(ReadOnlySpan<byte> data)
+    {
+        const uint Mod = 65521;
+        const int NMax = 5552;
+        uint a = 1, b = 0;
+        int i = 0;
+        while (i < data.Length)
+        {
+            int batch = Math.Min(NMax, data.Length - i);
+            for (int j = 0; j < batch; j++)
+            {
+                a += data[i + j];
+                b += a;
+            }
+            a %= Mod;
+            b %= Mod;
+            i += batch;
+        }
+        return (b << 16) | a;
     }
 
     private static void ReadFully(Stream s, byte[] buffer)
