@@ -376,6 +376,34 @@ public sealed class PkgReader : IDisposable
         throw new FileNotFoundException($"Entry not found: {entryPath}");
     }
 
+    /// <summary>
+    /// Extracts a single entry to an exact destination file path, creating the
+    /// parent directory if needed. Unlike <see cref="ExtractFile"/>, the caller
+    /// controls the final file name and location (no Image0/Sc0 prefix is added),
+    /// which is what preview/export pipelines that stage an entry into a temp dir
+    /// (and need a sibling .resS next to it) require.
+    /// </summary>
+    public void ExtractFileTo(string entryPath, string destPath)
+    {
+        entryPath = NormalizeEntryPath(entryPath);
+        string? parent = Path.GetDirectoryName(destPath);
+        if (!string.IsNullOrEmpty(parent))
+            Directory.CreateDirectory(parent);
+        if (entryPath.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase))
+        {
+            ExtractImage0FileTo(entryPath, destPath);
+            return;
+        }
+        if (entryPath.StartsWith("Sc0/", StringComparison.OrdinalIgnoreCase))
+        {
+            var e = FindSc0Entry(entryPath["Sc0/".Length..])
+                ?? throw new FileNotFoundException($"Entry not found: {entryPath}");
+            File.WriteAllBytes(destPath, ReadEntryData(e));
+            return;
+        }
+        throw new FileNotFoundException($"Entry not found: {entryPath}");
+    }
+
     /// <summary>Extracts a single entry and returns the raw bytes.</summary>
     public byte[] ExtractEntryBytes(string entryPath)
     {
@@ -844,6 +872,7 @@ public sealed class PkgReader : IDisposable
         else
         {
             string dest = SanitizeExtractPath(outputDirectory, "Image0/" + Path.GetFileName(path));
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
             if (node.Size > int.MaxValue) {
                 using var src = inner.OpenFileStream(node);
                 using var dst = File.Create(dest);

@@ -1035,4 +1035,78 @@ public class CompatibilityRegressionTests : IDisposable
         Assert.Equal("digests", vf.Stage);
         Assert.Equal("pfs_image_digest", vf.Structure);
     }
+
+    // ── 28. ExtractFile single file: creates parent dir, lands under Image0 ──
+
+    [Fact]
+    public void ExtractFile_SingleImage0File_CreatesParentAndLandsUnderImage0()
+    {
+        var (gp4, img) = MakeFixture("singlefile", ("dir/a.bin", Data(3)));
+        string pkg = Build(gp4, img, "singlefile.pkg");
+        string outDir = NewDir("singlefile_out");
+
+        using var reader = new PkgReader(pkg, Passcode);
+        // ExtractFile keeps the Image0/ prefix for single files (consistent
+        // with ExtractAll). The pre-fix bug: the parent dir was never created,
+        // so this threw DirectoryNotFoundException.
+        reader.ExtractFile("Image0/dir/a.bin", outDir);
+
+        string expected = Path.Combine(outDir, "Image0", "a.bin");
+        Assert.True(File.Exists(expected), $"expected extracted file at {expected}");
+        Assert.Equal(Data(3), File.ReadAllBytes(expected));
+    }
+
+    // ── 29. ExtractFileTo: exact destination, parent dir created, both layers ──
+
+    [Fact]
+    public void ExtractFileTo_Image0_WritesExactPathAndCreatesParent()
+    {
+        var (gp4, img) = MakeFixture("exactpath", ("dir/c.bin", Data(7)));
+        string pkg = Build(gp4, img, "exactpath.pkg");
+        string outDir = NewDir("exactpath_out");
+
+        using var reader = new PkgReader(pkg, Passcode);
+        // No Image0 prefix added — the caller controls the file name and the
+        // (not-yet-existing) nested parent directory is created.
+        string dest = Path.Combine(outDir, "staged", "nested", "c.bin");
+        reader.ExtractFileTo("Image0/dir/c.bin", dest);
+
+        Assert.True(File.Exists(dest), $"expected extracted file at exact {dest}");
+        Assert.Equal(Data(7), File.ReadAllBytes(dest));
+    }
+
+    [Fact]
+    public void ExtractFileTo_Sc0_WritesExactPath()
+    {
+        var (gp4, img) = MakeFixture("exactsc0", ("a.bin", Data(3)));
+        string pkg = Build(gp4, img, "exactsc0.pkg");
+        string outDir = NewDir("exactsc0_out");
+
+        using var reader = new PkgReader(pkg, Passcode);
+        // param.sfo is a mandatory Sc0 entry in every fixture. Resolve it
+        // by name via ExtractFileTo and confirm it round-trips to the exact
+        // destination (no Sc0/ prefix prepended).
+        var entries = reader.ListFiles()
+            .Where(f => f.Path.StartsWith("Sc0/", StringComparison.OrdinalIgnoreCase)
+                        && f.Path.EndsWith("param.sfo", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        Assert.NotEmpty(entries);
+
+        string dest = Path.Combine(outDir, "param.sfo");
+        reader.ExtractFileTo("Sc0/param.sfo", dest);
+        Assert.True(File.Exists(dest), $"expected Sc0 entry at exact {dest}");
+        Assert.True(new FileInfo(dest).Length > 0);
+    }
+
+    [Fact]
+    public void ExtractFileTo_UnknownEntry_Throws()
+    {
+        var (gp4, img) = MakeFixture("exactbad", ("a.bin", Data(3)));
+        string pkg = Build(gp4, img, "exactbad.pkg");
+        string outDir = NewDir("exactbad_out");
+
+        using var reader = new PkgReader(pkg, Passcode);
+        Assert.Throws<FileNotFoundException>(() =>
+            reader.ExtractFileTo("Image0/does/not/exist.bin", Path.Combine(outDir, "x.bin")));
+    }
 }
