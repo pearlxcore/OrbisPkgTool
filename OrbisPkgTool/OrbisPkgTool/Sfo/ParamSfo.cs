@@ -1,6 +1,13 @@
+using System.Globalization;
 using System.Text;
 
 namespace OrbisPkgTool.Sfo;
+
+/// <summary>
+/// A (Name, Value, Format) row of a param.sfo, as displayed by legacy SFO viewers.
+/// Integer rows (format 0x0404) are rendered as decimal strings.
+/// </summary>
+public sealed record SfoTable(string Name, string Value, ushort Format);
 
 /// <summary>
 /// A single param.sfo (PSF) value.
@@ -36,6 +43,18 @@ public sealed class ParamSfo
 
     public string GetString(string key) => this[key]?.StringValue ?? "";
     public int GetInt(string key) => this[key]?.IntValue ?? 0;
+
+    /// <summary>
+    /// Gets every value as a (Name, Value, Format) row, matching the legacy
+    /// PS4_Tools <c>PARAM_SFO.Table</c> shape. Integer rows (format 0x0404)
+    /// are rendered as decimal strings via <see cref="SfoValue.IntValue"/>;
+    /// all other rows use <see cref="SfoValue.StringValue"/>.
+    /// </summary>
+    public List<SfoTable> Tables =>
+        Values.Select(v => new SfoTable(
+            v.Key,
+            v.Format == FormatInt ? v.IntValue.ToString(CultureInfo.InvariantCulture) : v.StringValue,
+            v.Format)).ToList();
 
     public static ParamSfo Parse(byte[] data)
     {
