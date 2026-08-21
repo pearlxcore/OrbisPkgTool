@@ -217,14 +217,6 @@ compression-policy replay (Yooka-Laylee and the Impossible Lair, CUSA16139):
 | `img_extract` of a rebuilt PKG (Yooka, 2.6 GB) | **byte-identical** to our extractor (1081/1081 files, 0 hash mismatches) |
 | PFSC policy diff (rebuilt vs original) | **0 mismatches** across 1046 files |
 
-## Reverse-engineering notes
-
-See `REVERSE_ENGINEERING_NOTES.md` for the binary analysis (OpenSSL 1.0.2g
-statically linked, command/option strings, entry formats) and the validated
-format details — including the critical PS4 PFS AES-XTS
-**little-endian-first GF(2^128) tweak advance** that differs from the
-OpenSSL/mbedtls convention.
-
 ## Requirements
 
 - .NET 10 SDK (build) / .NET 10 runtime (run)
