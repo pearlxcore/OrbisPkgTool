@@ -7,53 +7,66 @@ all PKG/PFS/PFSC parsing, AES-128-CBC / RSA / AES-XTS crypto, and zlib
 deflate is implemented from scratch using `System.Security.Cryptography`.
 The only native interop is an **optional** `zlib1.dll` load for the 4 KiB
 deflate window used by PFSC compression (SharpZipLib fallback when absent).
+Also includes an in-process ATRAC9 audio decoder (`.at9` → WAV), a PSN
+official-update checker (TitlePatch XML/manifest parsing), and a legacy
+46-row PKG header dump for A/B comparison against the Sony tool.
 
 The compatibility core is **frozen** (commit 97dcfda): every format constant
 verified against real FPKGs and orbis-pub-cmd 3.87 output. A regression
-suite of 23 tests enforces it — see `OrbisPkgTool.Tests`.
+suite of 83 xUnit tests enforces it — see `OrbisPkgTool.Tests`.
 
 ## Projects
 
 ```
-OrbisPkgTool/                        class library (net10.0) — the core
+OrbisPkgTool/                        class library (net10.0-windows) + CLI
+                                      entry point (Program.cs) — drop-in
+                                      orbis-pub-cmd command syntax
   PkgReader.cs                       public API: ListFiles / ExtractFile /
-                                     ExtractEntryBytes / ExtractAll /
-                                     OpenRawPfscStream / InnerPfs
+                                      ExtractEntryBytes / ExtractAll /
+                                      OpenRawPfscStream / InnerPfs
   PkgFileEntry.cs                    listing entry model
   PkgInfo.cs                         metadata (title/id/type/category)
   Pkg/PkgHeader.cs                   PKG header (big-endian)
   Pkg/PkgEntry.cs                    entry table + well-known entry IDs/names
   Pkg/PkgBuilder.cs                  PKG builder (in-memory + streaming)
-                                     with per-file compression-policy replay
+                                      with per-file compression-policy replay
   Pkg/BuildOptions.cs                build options (PfscMode.Compressed default)
   Pkg/PkgValidator.cs                8-stage structural validation
-  Pkg/LibOrbisBuilder.cs             optional LibOrbisPkg backend
+                                      (--fake-tolerant for scene FPKGs)
+  Pkg/PkgHeaderDump.cs               legacy 46-row header dump for A/B
+                                      comparison against the Sony tool
   Crypto/PkgCrypto.cs                passcode → derived keys, AES-128-CBC
-                                     entry decryption, RSA, EKPFS
+                                      entry decryption, RSA, EKPFS
   Crypto/PkgKeySet.cs                embedded RSA keys (leaked dk3 private
-                                     key + fake keyset)
+                                      key + fake keyset)
   Gp4/Gp4Project.cs                  GP4 parse/serialize/generate
-                                     (pfs_compression-aware, --pfsc-profile)
+                                      (pfs_compression-aware, --pfsc-profile)
+  Media/                             in-process ATRAC9 decoder: .at9 → WAV
+                                      (At9Decoder + LibAtrac9 port)
+  Psn/UpdateCheck.cs                 PSN official update check: TitlePatch
+                                      XML + manifest JSON parsing
   Pfs/PfsFormat.cs                   FROZEN format-constant registry
   Pfs/PfsReader.cs                   PFS filesystem: inodes, dirents, XTS,
-                                     indirection, contiguous runs
+                                      indirection, consecutive runs
   Pfs/PfsWriter.cs                   inner/outer PFS writer + per-file block
-                                     allocation manifest (PfsBuildResult)
+                                      allocation manifest (PfsBuildResult)
   Pfs/PFSCStream.cs                  PFSC (zlib-compressed inner image)
-                                     decompression
+                                      decompression
   Pfs/PFSCWriter.cs                  PFSC writer: per-file raw/compressed
-                                     policy, both memory + streaming paths
+                                      policy, both memory + streaming paths
   Pfs/PfscDeflate.cs                 zlib1.dll 4 KiB-window deflate
-                                     (windowBits=-12, SharpZipLib fallback)
+                                      (windowBits=-12, SharpZipLib fallback)
   Pfs/PfscProfiler.cs                original-package compression-policy
-                                     inspector → GP4 profile JSON
-  Sfo/ParamSfo.cs                    param.sfo read/serialize
+                                      inspector → GP4 profile JSON
+  Sfo/ParamSfo.cs                    param.sfo read/serialize + tables-shaped
+                                      accessor + game/addon/theme templates
   Trp/Trp.cs                         trophy TRP pack read/create
-OrbisPkgTool/                        PKG/PFS/PFSC core library + CLI entry
-                                     point (Program.cs) — drop-in
-                                     orbis-pub-cmd command syntax
-OrbisPkgTool.Gui/                    Windows Forms GUI
-OrbisPkgTool.Tests/                  23-test compatibility regression suite
+  Util/MersenneTwister.cs            MT19937 for Sony's RSA2048EncryptKey
+                                      padding scheme (PkgCrypto)
+OrbisPkgTool.Gui/                    Windows Forms GUI (net10.0-windows)
+OrbisPkgTool.Tests/                  83-test xUnit suite: compatibility
+                                      regression, AT9 decoder, header dump,
+                                      SFO tables, PSN update check
 ```
 
 ## Commands
@@ -64,7 +77,8 @@ extract     : Extract files from a PKG         (extract -h for details)
 verify      : Verify PKG hashes/signatures
 info        : Show PKG metadata
 inspect     : Full PFS tree dump
-validate    : 8-stage structural validation
+entries     : Dump the raw PKG entry table (ids, flags, sizes, offsets)
+validate    : 8-stage structural validation    (--fake-tolerant for scene FPKGs)
 build       : Build a fake PKG from GP4        (build -h for details)
 orbis-build : Build a fake PKG using orbis-pub-cmd
 repack      : Extract + restructure + gp4gen + build (one-shot)
@@ -109,6 +123,12 @@ OrbisPkgTool.exe extract game.pkg:Image0/eboot.bin out/
 # 8-stage structural validation (digests, keys, PFSC, PFS, signatures):
 OrbisPkgTool.exe validate --passcode 00000000000000000000000000000000 game.pkg
 
+# Scene FPKGs sometimes ship with non-matching entry digests or signatures
+# left over from the repacking tool. --fake-tolerant skips those stages and
+# still verifies everything else, so you can validate a scene PKG without
+# false negatives:
+OrbisPkgTool.exe validate --fake-tolerant game.pkg
+
 # Generate a GP4 from an extracted dump:
 OrbisPkgTool.exe gp4gen ./Image0 --title "My Game" --title-id CUSA00001 --out game.gp4
 
@@ -152,6 +172,9 @@ foreach (var f in pkg.ListFiles())
 pkg.ExtractFile("Sc0/changeinfo/changeinfo.xml", outDir);
 pkg.ExtractAll(outDir);                                       // full PKG extraction
 
+// Extract a well-known entry by its numeric ID (e.g. param.sfo = 0x1000):
+byte[] sfo = pkg.ExtractEntryBytes(0x00001000);
+
 // Build a PKG from a GP4 + source folder, with per-file compression policy:
 PkgBuilder.Build("game.gp4", "./Image0", "game.pkg",
     new BuildOptions { PfscMode = PfscMode.Compressed, Validate = true });
@@ -171,11 +194,7 @@ streaming) produce byte-identical output.
 PFSC compressed blocks use a 4 KiB deflate window (zlib1.dll
 `deflateInit2`, windowBits=-12) — formally valid for the declared
 `0x48 0x89` zlib header (CINFO=4 → 4096-byte window) — with a SharpZipLib
-fallback when zlib is absent. See `docs/PFSC_COMPRESSION_POLICY.md` for
-the design, verification results, and the original's zero-fill ownership
-analysis (the 2.05 GB of zero blocks in scene FPKGs is proven to be a
-pre-allocated allocation-slack extent, not content; deliberately not
-reproduced).
+fallback when zlib is absent.
 
 ## Validation (vs the real orbis-pub-cmd.exe)
 
@@ -198,45 +217,6 @@ compression-policy replay (Yooka-Laylee and the Impossible Lair, CUSA16139):
 | `img_extract` of a rebuilt PKG (Yooka, 2.6 GB) | **byte-identical** to our extractor (1081/1081 files, 0 hash mismatches) |
 | PFSC policy diff (rebuilt vs original) | **0 mismatches** across 1046 files |
 
-## Cross-validation harness
-
-`CrossValidation/` runs the same packages through three independent
-implementations — OrbisPkgTool, Sony orbis-pub-cmd 3.87, and
-OpenOrbis/LibOrbisPkg (via a small test driver) — and compares:
-
-```
-Run-QuickValidation.ps1       environment + three readers + three validators
-Run-FullValidation.ps1        + triple extraction, six-path hashes, roundtrips,
-                              GP4 semantics, inner/outer PFS
-Run-RepackParity.ps1          fast one-shot: repack + our validate + Sony
-                              img_verify + Sony img_file_list + pfscprofile --ref
-Run-CompressionParity.ps1     full compression-parity matrix (config-driven):
-                              repack + profile (1), three readers (2), three
-                              validators (3), triple extraction (4), six-path
-                              content comparison (5), PFSC policy diff (6),
-                              round-trip idempotency (7)
-```
-
-Each run creates a timestamped directory under `Results/` with
-`run_status.txt`, `summary.txt`, and full per-command logs (command,
-working dir, timestamps, duration, exit code, stdout+stderr interleaved).
-See `CrossValidation/README.md` for setup and the confidence-label
-hierarchy (`SELF_VALIDATED` → `SONY_PC_VALIDATED` →
-`CROSS_IMPLEMENTATION_VALIDATED` → `PC_MAXIMUM_VALIDATED` →
-`REPACK_PARITY_PASS` → `CONSOLE_VALIDATED`).
-
-## Confidence labels
-
-- `SELF_VALIDATED` — our tools only.
-- `SONY_PC_VALIDATED` — + Sony orbis-pub-cmd.
-- `CROSS_IMPLEMENTATION_VALIDATED` — + OpenOrbis.
-- `PC_MAXIMUM_VALIDATED` — all of the above agree on readability, validation,
-  extraction contents, and at least one roundtrip.
-- `REPACK_PARITY_PASS` — `Run-RepackParity.ps1` fast smoke pass (repack +
-  our validate + Sony img_verify + img_file_list + 0 policy mismatches).
-- `CONSOLE_VALIDATED` — reserved for the actual jailbroken-PS4 install test
-  (see `docs/CONSOLE_VALIDATION_CHECKLIST.md`).
-
 ## Reverse-engineering notes
 
 See `REVERSE_ENGINEERING_NOTES.md` for the binary analysis (OpenSSL 1.0.2g
@@ -248,8 +228,10 @@ OpenSSL/mbedtls convention.
 ## Requirements
 
 - .NET 10 SDK (build) / .NET 10 runtime (run)
-- Windows (the GUI targets `net10.0-windows`; the CLI/core are cross-platform
-  but the optional `zlib1.dll` discovery prefers Windows paths)
+- Windows — the CLI, core, and GUI all target `net10.0-windows`
 - Optional: `zlib1.dll` for the 4 KiB deflate window (discovered at
   `%ORBISPKG_ZLIB%`, next to the exe, Git for Windows mingw64, or the PATH;
   SharpZipLib fallback when absent)
+- Tests: `dotnet test OrbisPkgTool.Tests/OrbisPkgTool.Tests.csproj`
+  (xUnit; the test project is not part of `OrbisPkgTool.slnx` and must be
+  run directly)
