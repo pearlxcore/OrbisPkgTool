@@ -403,6 +403,19 @@ public sealed class PkgReader : IDisposable
         throw new FileNotFoundException($"Entry not found: {entryPath}");
     }
 
+    /// <summary>
+    /// Extracts a single Sc0 system entry by its entry id (e.g. 0x1200
+    /// icon0.png, 0x1240 snd0.at9, 0x1400 trophy00.trp) — the legacy
+    /// PS4_Tools resolution order, which matched entries by ID rather
+    /// than by file name.
+    /// </summary>
+    public byte[] ExtractEntryBytes(uint entryId)
+    {
+        var e = _entries.FirstOrDefault(x => x.Id == entryId)
+            ?? throw new FileNotFoundException($"Entry not found: 0x{entryId:X8}");
+        return ReadEntryData(e);
+    }
+
     /// <summary>Extracts all files (Sc0 + Image0) to the output directory.</summary>
     public void ExtractAll(string outputDirectory, IProgress<(int Current, int Total, string CurrentFile)>? progress = null)
         => ExtractAll(outputDirectory, progress, new ExtractAllOptions());
