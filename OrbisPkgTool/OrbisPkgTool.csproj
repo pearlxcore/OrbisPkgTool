@@ -13,6 +13,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The project now lives at the repo root; the default compile glob would
+         otherwise pick up the sibling GUI and test projects' sources. -->
+    <Compile Remove="OrbisPkgTool.Gui/**/*.cs" />
+    <Compile Remove="OrbisPkgTool.Tests/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="SharpZipLib" Version="1.4.2" />
   </ItemGroup>
 
