@@ -24,6 +24,8 @@ public sealed record class PkgMergeRequest
     /// </summary>
     public string? WorkDirectory { get; init; }
     public bool KeepWorkDirectory { get; init; }
+    /// <summary>Delete the merge workspace when the build fails or is cancelled.</summary>
+    public bool CleanupWorkDirectoryOnFailure { get; init; }
     public string? Title { get; init; }
     public string? TitleId { get; init; }
     public string? ContentId { get; init; }
@@ -123,7 +125,8 @@ public sealed class PkgMergeService
         }
         catch
         {
-            // Deliberately retain all intermediates: they are essential for diagnosis.
+            if (request.CleanupWorkDirectoryOnFailure)
+                CleanupWorkDirectory(workDir);
             throw;
         }
     }
@@ -226,7 +229,21 @@ public sealed class PkgMergeService
     {
         string work = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workDir)) + Path.DirectorySeparatorChar;
         if (keep || Path.GetFullPath(output).StartsWith(work, StringComparison.OrdinalIgnoreCase)) return true;
-        try { Directory.Delete(workDir, true); return false; } catch { return true; }
+        CleanupWorkDirectory(workDir);
+        return Directory.Exists(workDir);
+    }
+
+    private static void CleanupWorkDirectory(string workDir)
+    {
+        try
+        {
+            if (Directory.Exists(workDir))
+                Directory.Delete(workDir, recursive: true);
+        }
+        catch
+        {
+            // Cleanup is best-effort; preserve the original merge outcome.
+        }
     }
     private static void Report(PkgMergeRequest r, string stage, int current = 0, int total = 0, string? currentFile = null, long currentBytes = 0, long totalBytes = 0) => r.Progress?.Report(new PkgMergeProgress(stage, current, total, currentFile, currentBytes, totalBytes));
 }
