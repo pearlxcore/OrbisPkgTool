@@ -1157,403 +1157,62 @@ static void RunRepack(string[] args)
 /// </summary>
 static void RunMerge(string[] args)
 {
-    string? basePkg = null, updatePkg = null, outFile = null;
-    string? passcode = null, basePasscode = null, updatePasscode = null;
-    string? title = null, titleId = null, contentId = null;
-    string? workDir = null;
-    bool validate = false, keepWork = false;
-    string pfscMode = "compressed";
-    int workers = 1;
+    try
+    {
+        var request = ParseMergeRequest(args);
+        var progress = new Progress<OrbisPkgTool.PkgMergeProgress>(p =>
+        {
+            string detail = p.CurrentFile ?? (p.Percentage is double percent ? $"{percent:F0}%" : "");
+            Console.WriteLine($"[{p.Stage}]{(string.IsNullOrEmpty(detail) ? "" : " " + detail)}");
+        });
+        var result = new OrbisPkgTool.PkgMergeService().Merge(request with { Progress = progress });
+        Console.WriteLine($"Merge complete in {result.Elapsed.TotalSeconds:F1}s: {result.OutputPkgPath}");
+        if (result.WorkDirectoryKept) Console.WriteLine($"Work directory kept: {result.WorkDirectory}");
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine("[error] Merge cancelled. Work directory was kept.");
+        Environment.ExitCode = 130;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[error] Merge failed: {ex.Message}");
+        Environment.ExitCode = 1;
+    }
+}
 
+static OrbisPkgTool.PkgMergeRequest ParseMergeRequest(string[] args)
+{
+    string? basePkg = null, updatePkg = null, output = null, passcode = null, basePasscode = null, updatePasscode = null;
+    string? title = null, titleId = null, contentId = null, workDir = null;
+    bool validate = false, keepWork = false; int workers = 1;
+    var pfscMode = OrbisPkgTool.Pkg.PfscMode.Compressed;
     for (int i = 0; i < args.Length; i++)
     {
         switch (args[i])
         {
-            case "--out"             when i + 1 < args.Length: outFile        = args[++i]; break;
-            case "--passcode"        when i + 1 < args.Length: passcode       = args[++i]; break;
-            case "--base-passcode"   when i + 1 < args.Length: basePasscode  = args[++i]; break;
-            case "--update-passcode" when i + 1 < args.Length: updatePasscode= args[++i]; break;
-            case "--title"           when i + 1 < args.Length: title          = args[++i]; break;
-            case "--title-id"        when i + 1 < args.Length: titleId       = args[++i]; break;
-            case "--content-id"      when i + 1 < args.Length: contentId    = args[++i]; break;
-            case "--pfsc-mode"       when i + 1 < args.Length: pfscMode      = args[++i]; break;
-            case "--work-dir"        when i + 1 < args.Length: workDir      = args[++i]; break;
-            case "--workers" when i + 1 < args.Length && int.TryParse(args[i + 1], out int w) && w >= 0:
-                workers = w; ++i; break;
+            case "--out" when i + 1 < args.Length: output = args[++i]; break;
+            case "--passcode" when i + 1 < args.Length: passcode = args[++i]; break;
+            case "--base-passcode" when i + 1 < args.Length: basePasscode = args[++i]; break;
+            case "--update-passcode" when i + 1 < args.Length: updatePasscode = args[++i]; break;
+            case "--title" when i + 1 < args.Length: title = args[++i]; break;
+            case "--title-id" when i + 1 < args.Length: titleId = args[++i]; break;
+            case "--content-id" when i + 1 < args.Length: contentId = args[++i]; break;
+            case "--work-dir" when i + 1 < args.Length: workDir = args[++i]; break;
             case "--validate": validate = true; break;
             case "--keep-work": keepWork = true; break;
-            default:
-                if (!args[i].StartsWith('-'))
-                {
-                    if (basePkg == null) basePkg = args[i];
-                    else if (updatePkg == null) updatePkg = args[i];
-                }
-                break;
+            case "--pfsc-mode" when i + 1 < args.Length:
+                pfscMode = args[++i].Equals("store", StringComparison.OrdinalIgnoreCase) ? OrbisPkgTool.Pkg.PfscMode.Store : OrbisPkgTool.Pkg.PfscMode.Compressed; break;
+            case "--workers" when i + 1 < args.Length && int.TryParse(args[i + 1], out int parsed) && parsed >= 0: workers = parsed; i++; break;
+            case var _ when !args[i].StartsWith('-'):
+                if (basePkg == null) basePkg = args[i]; else if (updatePkg == null) updatePkg = args[i]; break;
         }
     }
-
-    if (basePkg == null || updatePkg == null || !File.Exists(basePkg) || !File.Exists(updatePkg))
-    {
-        Console.Error.WriteLine("usage: merge <base.pkg> <update.pkg> [--out <output.pkg>]");
-        Console.Error.WriteLine("              [--passcode X] [--base-passcode X] [--update-passcode X]");
-        Console.Error.WriteLine("              [--validate] [--pfsc-mode compressed|store]");
-        Console.Error.WriteLine("              [--workers N] [--title \"Name\"] [--title-id CUSA00001]");
-        Console.Error.WriteLine("              [--content-id X] [--work-dir <dir>] [--keep-work]");
-        Console.Error.WriteLine();
-        Console.Error.WriteLine("  Extract base + update, overlay update files onto base, repack as one PKG.");
-        Console.Error.WriteLine("  Output is always sealed with the default all-zeros passcode.");
-        Environment.ExitCode = 2;
-        return;
-    }
-
-    // Resolve per-PKG passcodes: per-PKG flag → shared --passcode → default.
-    string basePc   = !string.IsNullOrEmpty(basePasscode)   ? basePasscode   :
-                      !string.IsNullOrEmpty(passcode)       ? passcode       : PkgBuilder.DefaultPasscode;
-    string updatePc = !string.IsNullOrEmpty(updatePasscode) ? updatePasscode :
-                      !string.IsNullOrEmpty(passcode)       ? passcode       : PkgBuilder.DefaultPasscode;
-    // Output PKG is always sealed with the default passcode.
-    string outPc = PkgBuilder.DefaultPasscode;
-
-    Console.WriteLine("===================================================================");
-    Console.WriteLine("  OrbisPkgTool MERGE");
-    Console.WriteLine($"  Base   : {basePkg}");
-    Console.WriteLine($"  Update : {updatePkg}");
-    Console.WriteLine("===================================================================");
-    Console.WriteLine();
-
-    // ── Pre-checks ─────────────────────────────────────────────
-    bool baseIsPatch = false, updateIsPatch = false;
-    string baseTitleId = "", updateTitleId = "";
-    string baseAppVer = "", updateAppVer = "";
-    uint baseContentType = 0, baseContentFlags = 0;
-
-    try
-    {
-        using (var baseReader = new PkgReader(basePkg, basePc))
-        {
-            if (baseReader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
-                Console.Error.WriteLine($"[warn] base: {baseReader.PasscodeStatus}");
-            var baseInfo = baseReader.GetInfo();
-            baseIsPatch = baseInfo.Type == PkgType.Patch;
-            baseTitleId = baseInfo.TitleId;
-            baseAppVer = baseInfo.AppVersion;
-            baseContentType = baseInfo.ContentType;
-            baseContentFlags = baseInfo.ContentFlags;
-            if (baseIsPatch)
-            {
-                Console.Error.WriteLine("[error] Base PKG is a patch (CATEGORY=gp), not a base app.");
-                Console.Error.WriteLine("        merge requires a base app PKG to overlay the update onto.");
-                Environment.ExitCode = 1;
-                return;
-            }
-            Console.WriteLine($"  Base   : {baseInfo.Title} | {baseTitleId} | app {baseAppVer}");
-        }
-
-        using (var updateReader = new PkgReader(updatePkg, updatePc))
-        {
-            if (updateReader.PasscodeStatus.StartsWith("passcode mismatch", StringComparison.Ordinal))
-                Console.Error.WriteLine($"[warn] update: {updateReader.PasscodeStatus}");
-            var updateInfo = updateReader.GetInfo();
-            updateIsPatch = updateInfo.Type == PkgType.Patch;
-            updateTitleId = updateInfo.TitleId;
-            updateAppVer = updateInfo.AppVersion;
-            Console.WriteLine($"  Update : {updateInfo.Title} | {updateTitleId} | app {updateAppVer}");
-            if (!updateIsPatch)
-                Console.Error.WriteLine($"[warn] Update PKG is not a patch (CATEGORY={updateInfo.Type}). Proceeding anyway.");
-        }
-
-        if (!string.Equals(baseTitleId, updateTitleId, StringComparison.OrdinalIgnoreCase))
-        {
-            Console.Error.WriteLine($"[error] TITLE_ID mismatch: base={baseTitleId} update={updateTitleId}");
-            Console.Error.WriteLine("        The base and update must be for the same game.");
-            Environment.ExitCode = 1;
-            return;
-        }
-
-        // Warn if the update version is not newer (likely wrong order).
-        if (Version.TryParse(baseAppVer, out var bV) && Version.TryParse(updateAppVer, out var uV) && uV <= bV)
-        {
-            Console.Error.WriteLine($"[warn] Update version ({updateAppVer}) is not newer than base ({baseAppVer}).");
-            Console.Error.WriteLine("       The update should usually have a higher version number.");
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"[error] Pre-check failed: {ex.Message}");
-        Environment.ExitCode = 1;
-        return;
-    }
-
-    // ── Setup work directory ────────────────────────────────────
-    if (workDir == null)
-    {
-        string baseName = Path.GetFileNameWithoutExtension(basePkg);
-        var safe = new string(baseName.Select(c =>
-                Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray());
-        if (safe.Length > 40) safe = safe[..40];
-        workDir = Path.Combine(Path.GetTempPath(), $"pkg_merge_{safe}_{Guid.NewGuid().ToString("N")[..12]}");
-    }
-    Directory.CreateDirectory(workDir);
-    string dumpBaseDir  = Path.Combine(workDir, "dump_base");
-    string dumpUpdDir   = Path.Combine(workDir, "dump_upd");
-    string image0Dir    = Path.Combine(dumpBaseDir, "Image0");
-    string gp4Path      = Path.Combine(workDir, "project.gp4");
-    string profilePath  = Path.Combine(workDir, "pfsc_profile.json");
-
-    if (outFile == null)
-        outFile = Path.Combine(workDir, Path.GetFileNameWithoutExtension(basePkg) + "_merged.pkg");
-
-    Console.WriteLine($"Work dir : {workDir}");
-    Console.WriteLine($"Output   : {outFile}");
-    Console.WriteLine();
-
-    var overallSw = System.Diagnostics.Stopwatch.StartNew();
-
-    try
-    {
-        // ── 1. Extract base ───────────────────────────────────────
-        Console.WriteLine("[1/6] Extracting base PKG...");
-        List<OrbisPkgTool.Pfs.PfscFilePolicy>? baseProfileFiles = null;
-        ExtractOne(basePkg, basePc, dumpBaseDir, "  base");
-
-        // Profile the base BEFORE its reader is disposed (needs the
-        // un-disposed reader's PFS layers). With --pfsc-mode compressed
-        // this is replayed into the GP4 so the rebuild matches the
-        // original's raw/compressed decisions.
-        if (pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase))
-        {
-            baseProfileFiles = ProfileOne(basePkg, basePc, "  base");
-        }
-
-        // GC between the two extractions so the base's reader buffers
-        // are released before the update's reader allocates.
-        GcCompact();
-
-        // ── 2. Extract update ─────────────────────────────────────
-        Console.WriteLine("[2/6] Extracting update PKG...");
-        ExtractOne(updatePkg, updatePc, dumpUpdDir, "  update");
-
-        List<OrbisPkgTool.Pfs.PfscFilePolicy>? updateProfileFiles = null;
-        if (pfscMode.Equals("compressed", StringComparison.OrdinalIgnoreCase))
-        {
-            updateProfileFiles = ProfileOne(updatePkg, updatePc, "  update");
-        }
-
-        // GC before the overlay (no more readers needed).
-        GcCompact();
-
-        // ── 3. Overlay update onto base ────────────────────────────
-        Console.WriteLine("[3/6] Overlaying update onto base...");
-        int replaced = 0, added = 0, skippedSfo = 0;
-        // Move Image0/** and Sc0/** from dump_upd into dump_base with overwrite.
-        foreach (string sub in new[] { "Image0", "Sc0" })
-        {
-            string srcDir = Path.Combine(dumpUpdDir, sub);
-            if (!Directory.Exists(srcDir)) continue;
-            string dstDir = Path.Combine(dumpBaseDir, sub);
-            foreach (string file in Directory.GetFiles(srcDir, "*", SearchOption.AllDirectories))
-            {
-                string rel = Path.GetRelativePath(srcDir, file).Replace('\\', '/');
-                // The update's param.sfo must NOT replace the base's: it
-                // carries CATEGORY=gp (patch), which would mislabel the
-                // merged PKG as a patch. Keep the base's sfo and patch
-                // only its version fields below (community
-                // "integrate update into base" convention: APP_VER and
-                // VERSION = the update's APP_VER).
-                bool isSfo = (sub == "Sc0"   && rel.Equals("param.sfo",             StringComparison.OrdinalIgnoreCase))
-                          || (sub == "Image0" && rel.Equals("sce_sys/param.sfo",    StringComparison.OrdinalIgnoreCase));
-                if (isSfo) { skippedSfo++; continue; }
-                string dest = Path.Combine(dstDir, rel);
-                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                bool exists = File.Exists(dest);
-                File.Move(file, dest, overwrite: true);
-                if (exists) replaced++; else added++;
-            }
-        }
-        Console.WriteLine($"  Replaced: {replaced} files, Added: {added} files" +
-            (skippedSfo > 0 ? $", kept base param.sfo ({skippedSfo} location(s) skipped)" : ""));
-
-        // Patch the base's param.sfo version fields to the update's APP_VER.
-        // Everything else in the base sfo (CATEGORY=gd, ATTRIBUTE, PUBTOOLINFO,
-        // SYSTEM_VER, ...) is preserved — only the version moves forward.
-        if (!string.IsNullOrEmpty(updateAppVer))
-        {
-            foreach (string sfoPath in new[] {
-                         Path.Combine(dumpBaseDir, "Sc0", "param.sfo"),
-                         Path.Combine(dumpBaseDir, "Image0", "sce_sys", "param.sfo") })
-            {
-                if (!File.Exists(sfoPath)) continue;
-                var sfo = OrbisPkgTool.Sfo.ParamSfo.Parse(File.ReadAllBytes(sfoPath));
-                sfo.SetString("APP_VER", updateAppVer, 0x8);
-                sfo.SetString("VERSION", updateAppVer, 0x8);
-                File.WriteAllBytes(sfoPath, sfo.Serialize());
-                Console.WriteLine($"  param.sfo: APP_VER/VERSION -> {updateAppVer} (CATEGORY={sfo.GetString("CATEGORY")} kept)");
-            }
-        }
-        else
-        {
-            Console.Error.WriteLine("[warn] Update has no APP_VER — base param.sfo versions left unchanged.");
-        }
-        // Free the (now-empty) update dump to save disk for the build.
-        Directory.Delete(dumpUpdDir, recursive: true);
-        Console.WriteLine($"  Freed update dump: {dumpUpdDir}");
-
-        // ── 4. Restructure merged dump ────────────────────────────
-        Console.WriteLine("[4/6] Restructuring merged dump...");
-        RunRestructure([dumpBaseDir]);
-
-        // ── 4b. Merge PFSC profiles (union, update wins) ─────────
-        List<OrbisPkgTool.Pfs.PfscFilePolicy>? mergedProfile = null;
-        if (baseProfileFiles != null)
-        {
-            // Start with base; overlay update's policies (update wins on conflicts).
-            var byPath = new Dictionary<string, OrbisPkgTool.Pfs.PfscPolicy>(StringComparer.OrdinalIgnoreCase);
-            foreach (var f in baseProfileFiles)
-                byPath[f.Path] = f.Policy;
-            int baseOnly = byPath.Count;
-            if (updateProfileFiles != null)
-            {
-                int updReplaced = 0, updNew = 0;
-                foreach (var f in updateProfileFiles)
-                {
-                    if (byPath.ContainsKey(f.Path)) { updReplaced++; }
-                    else { updNew++; }
-                    byPath[f.Path] = f.Policy;
-                }
-                Console.WriteLine($"  PFSC union: {baseOnly} base + {updateProfileFiles.Count} update ({updReplaced} replaced, {updNew} new) = {byPath.Count} merged");
-            }
-            mergedProfile = byPath.Select(kv =>
-                new OrbisPkgTool.Pfs.PfscFilePolicy(kv.Key, 0, 0, kv.Value)).ToList();
-            long disabled = mergedProfile.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Disable);
-            long enabled  = mergedProfile.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Enable);
-            Console.WriteLine($"  PFSC profile: {mergedProfile.Count} files ({enabled} compressed, {disabled} stored raw)");
-        }
-
-        // Persist the merged profile (sidecar, OUTSIDE Image0 so gp4gen
-        // never packages it into the rebuilt PFS).
-        if (mergedProfile != null)
-        {
-            File.WriteAllText(profilePath, OrbisPkgTool.Pfs.PfscProfiler.ToJson(mergedProfile));
-            Console.WriteLine($"  Compression profile saved: {profilePath}");
-        }
-
-        // ── 5. Generate GP4 (NO --patch — this is a base app) ────
-        Console.WriteLine("[5/6] Generating GP4 project...");
-        var gp4Args = new List<string> { image0Dir, "--out", gp4Path };
-        // merge always produces a base app, never a patch
-        if (title != null)      { gp4Args.Add("--title");      gp4Args.Add(title); }
-        if (titleId != null)    { gp4Args.Add("--title-id");   gp4Args.Add(titleId); }
-        if (contentId != null)  { gp4Args.Add("--content-id"); gp4Args.Add(contentId); }
-        if (outPc != PkgBuilder.DefaultPasscode) { gp4Args.Add("--passcode"); gp4Args.Add(outPc); }
-        if (mergedProfile != null) { gp4Args.Add("--pfsc-profile"); gp4Args.Add(profilePath); }
-        RunGp4Gen(gp4Args.ToArray());
-
-        // ── 5b. Build (with base's content_type/flags, NOT update's) ─
-        Console.WriteLine("[5b/6] Building merged PKG (pure C#)...");
-        var buildArgs = new List<string> { gp4Path, image0Dir, "--out", outFile, "--passcode", outPc };
-        if (pfscMode != "store") { buildArgs.Add("--pfsc-mode"); buildArgs.Add(pfscMode); }
-        if (workers != 1)        { buildArgs.Add("--workers");    buildArgs.Add(workers.ToString()); }
-        // Carry the BASE's content_type/content_flags — not the update's
-        // (patch flags would mislabel the merged PKG as a patch).
-        if (baseContentType != 0)  { buildArgs.Add("--content-type");  buildArgs.Add($"0x{baseContentType:X}"); }
-        if (baseContentFlags != 0) { buildArgs.Add("--content-flags"); buildArgs.Add($"0x{baseContentFlags:X}"); }
-        RunPkgBuild(buildArgs.ToArray());
-        if (Environment.ExitCode != 0 || !File.Exists(outFile))
-        {
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("[error] PKG build failed. Output package was not created.");
-            Console.Error.WriteLine($"Work dir kept for debugging: {workDir}");
-            Environment.ExitCode = Environment.ExitCode == 0 ? 1 : Environment.ExitCode;
-            return;
-        }
-        var pkgSize = new FileInfo(outFile).Length;
-        Console.WriteLine($"  Output: {outFile} ({pkgSize / 1024.0 / 1024.0:F1} MB)");
-
-        // ── 6. Validate ─────────────────────────────────────────
-        if (validate)
-        {
-            Console.WriteLine("[6/6] Validating merged PKG...");
-            RunValidate(outFile, outPc);
-        }
-
-        overallSw.Stop();
-        Console.WriteLine();
-        Console.WriteLine("===================================================================");
-        Console.WriteLine($"  MERGE COMPLETE in {overallSw.Elapsed.TotalSeconds:F1}s");
-        Console.WriteLine($"  Output: {outFile}");
-        Console.WriteLine("===================================================================");
-        CleanupWorkDirOnSuccess(workDir, outFile, keepWork);
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine();
-        Console.Error.WriteLine($"[error] Merge failed: {ex.Message}");
-        if (ex.StackTrace != null)
-            Console.Error.WriteLine(ex.StackTrace);
-        Console.Error.WriteLine($"Work dir kept for debugging: {workDir}");
-        Environment.ExitCode = 1;
-    }
-
-    // ── Local helpers ──────────────────────────────────────────
-    static void ExtractOne(string pkg, string pc, string dumpDir, string label)
-    {
-        using var reader = new PkgReader(pkg, pc);
-        Directory.CreateDirectory(dumpDir);
-        int done = 0, total = 0;
-        var extractFailures = reader.ExtractAll(dumpDir,
-            new Progress<(int Current, int Total, string File)>(p =>
-        {
-            done = p.Current; total = p.Total;
-            int pct = total > 0 ? (int)(100.0 * done / total) : 0;
-            string line = $"{label} [{pct,3}%] {p.File}";
-            int w = SafeWindowWidth();
-            if (line.Length < w) line += new string(' ', w - line.Length);
-            Console.Write($"\r{line}");
-        }), new ExtractAllOptions());
-        if (total > 0) Console.WriteLine($"\r{label} [100%] {total - extractFailures.Count}/{total} files extracted.".PadRight(SafeWindowWidth()));
-        if (extractFailures.Count > 0)
-        {
-            Console.Error.WriteLine();
-            Console.Error.WriteLine($"[error] {extractFailures.Count} file(s) failed to extract — aborting.");
-            foreach (var f in extractFailures)
-                Console.Error.WriteLine($"  {f.Path}: {f.Exception.Message}");
-            throw new InvalidOperationException("extraction failed");
-        }
-    }
-
-    static List<OrbisPkgTool.Pfs.PfscFilePolicy>? ProfileOne(string pkg, string pc, string label)
-    {
-        try
-        {
-            var files = OrbisPkgTool.Pfs.PfscProfiler.Profile(pkg, pc,
-                out var stats, out var profileError);
-            if (files != null)
-            {
-                long disabled = files.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Disable);
-                long enabled  = files.Count(f => f.Policy == OrbisPkgTool.Pfs.PfscPolicy.Enable);
-                Console.WriteLine($"{label} PFSC profile: {files.Count} files ({enabled} compressed, {disabled} stored raw)");
-            }
-            else
-            {
-                Console.WriteLine($"{label} [note] {profileError ?? "no PFSC profile"} — building with uniform compression");
-            }
-            return files;
-        }
-        catch (Exception pex)
-        {
-            Console.WriteLine($"{label} [note] PFSC profiling failed ({pex.Message}) — building with uniform compression");
-            return null;
-        }
-    }
-
-    static void GcCompact()
-    {
-        System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
-            System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-        GC.WaitForPendingFinalizers();
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-    }
+    if (basePkg == null || updatePkg == null) throw new ArgumentException("usage: merge <base.pkg> <update.pkg> [--out <output.pkg>] [--passcode X] [--base-passcode X] [--update-passcode X] [--validate] [--pfsc-mode compressed|store] [--workers N] [--title X] [--title-id X] [--content-id X] [--work-dir <dir>] [--keep-work]");
+    return new OrbisPkgTool.PkgMergeRequest { BasePkgPath = basePkg, UpdatePkgPath = updatePkg, OutputPkgPath = output,
+        BasePasscode = basePasscode ?? passcode, UpdatePasscode = updatePasscode ?? passcode, ValidateAfterBuild = validate,
+        PfscMode = pfscMode, WorkerCount = workers, WorkDirectory = workDir, KeepWorkDirectory = keepWork,
+        Title = title, TitleId = titleId, ContentId = contentId };
 }
 
 /// <summary>

@@ -2,6 +2,8 @@ using OrbisPkgTool.Binary;
 using OrbisPkgTool.Crypto;
 using OrbisPkgTool.Pfs;
 using OrbisPkgTool.Pkg;
+using System.Buffers;
+using System.Security.Cryptography;
 
 namespace OrbisPkgTool;
 
@@ -211,7 +213,10 @@ public sealed class PkgReader : IDisposable
         _pkgPath = pkgPath;
         _passcode = passcode;
         _keySet = keySet ?? PkgKeySet.Standard;
-        _stream = new FileStream(pkgPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        // Extraction reads large PKGs for extended periods. A larger buffer
+        // reduces managed I/O calls while PFS/PFSC perform their own seeks.
+        _stream = new FileStream(pkgPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 1024 * 1024, FileOptions.None);
         try
         {
             _reader = new BigEndianReader(_stream);
@@ -398,7 +403,8 @@ public sealed class PkgReader : IDisposable
         {
             var e = FindSc0Entry(entryPath["Sc0/".Length..])
                 ?? throw new FileNotFoundException($"Entry not found: {entryPath}");
-            File.WriteAllBytes(destPath, ReadEntryData(e));
+            using var output = CreateExtractionOutput(destPath);
+            CopyEntryDataTo(e, output);
             return;
         }
         throw new FileNotFoundException($"Entry not found: {entryPath}");
@@ -444,6 +450,25 @@ public sealed class PkgReader : IDisposable
         return ReadEntryData(e);
     }
 
+    /// <summary>
+    /// Extracts a Sc0 entry to an exact file path without materializing its
+    /// complete contents in memory. This is intended for large entries such as
+    /// trophy archives.
+    /// </summary>
+    public void ExtractEntryToFile(uint entryId, string destPath)
+    {
+        var entry = _entries.FirstOrDefault(x => x.Id == entryId)
+            ?? throw new FileNotFoundException($"Entry not found: 0x{entryId:X8}");
+
+        string? parent = Path.GetDirectoryName(destPath);
+        if (!string.IsNullOrEmpty(parent))
+            Directory.CreateDirectory(parent);
+
+        using var output = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 1024 * 1024, FileOptions.SequentialScan);
+        CopyEntryDataTo(entry, output);
+    }
+
     /// <summary>Extracts all files (Sc0 + Image0) to the output directory.</summary>
     public void ExtractAll(string outputDirectory, IProgress<(int Current, int Total, string CurrentFile)>? progress = null)
         => ExtractAll(outputDirectory, progress, new ExtractAllOptions());
@@ -460,6 +485,7 @@ public sealed class PkgReader : IDisposable
         // full tree and the rebuild carries them through.
         foreach (var d in all.Where(f => f.IsDirectory))
         {
+            options.CancellationToken.ThrowIfCancellationRequested();
             try
             {
                 Directory.CreateDirectory(SanitizeExtractPath(outputDirectory, d.Path));
@@ -481,7 +507,7 @@ public sealed class PkgReader : IDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 if (f.Path.StartsWith("Image0/", StringComparison.OrdinalIgnoreCase))
                 {
-                    ExtractImage0FileTo(f.Path, dest, f.Inode);
+                    ExtractImage0FileTo(f.Path, dest, f.Inode, options.CancellationToken);
                 }
                 else
                 {
@@ -494,8 +520,8 @@ public sealed class PkgReader : IDisposable
                         throw new InvalidDataException(
                             $"Cannot resolve PKG entry for '{f.Path}' (entry id={f.EntryId}). " +
                             "The package may be corrupt or use an unnamed entry without a synthetic name.");
-                    var data = ReadEntryData(entry);
-                    File.WriteAllBytes(dest, data);
+                    using var output = CreateExtractionOutput(dest);
+                    CopyEntryDataTo(entry, output, options.CancellationToken);
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -507,7 +533,8 @@ public sealed class PkgReader : IDisposable
         return failures;
     }
 
-    private void ExtractImage0FileTo(string entryPath, string destPath, Pfs.PfsInode? cachedInode = null)
+    private void ExtractImage0FileTo(string entryPath, string destPath, Pfs.PfsInode? cachedInode = null,
+        System.Threading.CancellationToken cancellationToken = default)
     {
         entryPath = NormalizeEntryPath(entryPath);
         var inner = OpenInnerPfs() ?? throw new FileNotFoundException($"Entry not found: {entryPath}");
@@ -518,21 +545,8 @@ public sealed class PkgReader : IDisposable
         var node = cachedInode ?? inner.FindFile(entryPath["Image0/".Length..]);
         if (node == null)
             throw new FileNotFoundException($"Entry not found: {entryPath}");
-        // Stream large files directly to disk, small files via memory.
-        // 64 MB threshold: files above this are streamed via OpenFileStream
-        // to avoid holding multi-hundred-MB byte[]s in GC during extract
-        // (the old 512 MB threshold let 200+ MB files pile up in Gen 2
-        // before the build stage even started).
-        if (node.Size > 64 * 1024 * 1024) // 64 MB threshold
-        {
-            using var src = inner.OpenFileStream(node);
-            using var dst = File.Create(destPath);
-            src.CopyTo(dst);
-        }
-        else
-        {
-            File.WriteAllBytes(destPath, inner.ReadFileData(node));
-        }
+        using var output = CreateExtractionOutput(destPath);
+        inner.CopyFileTo(node, output, cancellationToken);
     }
 
     // ------------------------------------------------------------------
@@ -647,8 +661,13 @@ public sealed class PkgReader : IDisposable
             throw new FileNotFoundException($"Entry not found: Sc0/{name}");
         string dest = SanitizeExtractPath(outputDirectory, "Sc0/" + name);
         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-        File.WriteAllBytes(dest, ReadEntryData(e));
+        using var output = CreateExtractionOutput(dest);
+        CopyEntryDataTo(e, output);
     }
+
+    private static FileStream CreateExtractionOutput(string path) =>
+        new(path, FileMode.Create, FileAccess.Write, FileShare.None,
+            bufferSize: 1024 * 1024, FileOptions.SequentialScan);
 
     private byte[] ReadEntryData(PkgEntry e)
     {
@@ -667,6 +686,78 @@ public sealed class PkgReader : IDisposable
             data = PkgCrypto.DecryptAesCbc(key, iv, data, (int)e.DataSize);
         }
         return data;
+    }
+
+    private void CopyEntryDataTo(PkgEntry entry, Stream destination,
+        System.Threading.CancellationToken cancellationToken = default)
+    {
+        long storedSize = entry.IsEncrypted ? (entry.DataSize + 15) & ~15L : entry.DataSize;
+        if (entry.DataOffset + storedSize > _stream.Length)
+            throw new InvalidDataException("Entry data is out of bounds.");
+
+        byte[] input = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+        byte[]? decrypted = null;
+        try
+        {
+            _stream.Position = entry.DataOffset;
+            long remainingStored = storedSize;
+            long remainingLogical = entry.DataSize;
+
+            if (!entry.IsEncrypted)
+            {
+                while (remainingStored > 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int requested = (int)Math.Min(input.Length, remainingStored);
+                    ReadExactly(_stream, input, requested);
+                    destination.Write(input, 0, requested);
+                    remainingStored -= requested;
+                }
+                return;
+            }
+
+            decrypted = ArrayPool<byte>.Shared.Rent(input.Length);
+            var derivedKey = _derivedKeys[entry.KeyIndex & 7];
+            var (iv, key) = PkgCrypto.DeriveEntryKey(entry, derivedKey);
+            using var aes = Aes.Create();
+            aes.Key = key;
+            aes.IV = iv;
+            aes.Mode = CipherMode.CBC;
+            aes.Padding = PaddingMode.None;
+            using ICryptoTransform decryptor = aes.CreateDecryptor();
+
+            while (remainingStored > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int requested = (int)Math.Min(input.Length & ~15, remainingStored);
+                ReadExactly(_stream, input, requested);
+                decryptor.TransformBlock(input, 0, requested, decrypted, 0);
+                int toWrite = (int)Math.Min(remainingLogical, requested);
+                if (toWrite > 0)
+                    destination.Write(decrypted, 0, toWrite);
+                remainingStored -= requested;
+                remainingLogical -= toWrite;
+            }
+            decryptor.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(input);
+            if (decrypted != null)
+                ArrayPool<byte>.Shared.Return(decrypted);
+        }
+    }
+
+    private static void ReadExactly(Stream stream, byte[] buffer, int count)
+    {
+        int offset = 0;
+        while (offset < count)
+        {
+            int read = stream.Read(buffer, offset, count - offset);
+            if (read == 0)
+                throw new EndOfStreamException("Unexpected end of PKG entry.");
+            offset += read;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -859,27 +950,16 @@ public sealed class PkgReader : IDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 // f.Inode was carried by WalkPfsTree — no FindFile re-resolution.
                 var fileIno = f.Inode ?? inner.FindFile(Unprefix(f.Path))!;
-                if (fileIno.Size > 64 * 1024 * 1024) {
-                    // Large file — stream to disk
-                    using var src = inner.OpenFileStream(fileIno);
-                    using var dst = File.Create(dest);
-                    src.CopyTo(dst);
-                } else {
-                    File.WriteAllBytes(dest, inner.ReadFileData(fileIno));
-                }
+                using var output = CreateExtractionOutput(dest);
+                inner.CopyFileTo(fileIno, output);
             }
         }
         else
         {
             string dest = SanitizeExtractPath(outputDirectory, "Image0/" + Path.GetFileName(path));
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            if (node.Size > int.MaxValue) {
-                using var src = inner.OpenFileStream(node);
-                using var dst = File.Create(dest);
-                src.CopyTo(dst);
-            } else {
-                File.WriteAllBytes(dest, inner.ReadFileData(node));
-            }
+            using var output = CreateExtractionOutput(dest);
+            inner.CopyFileTo(node, output);
         }
     }
 

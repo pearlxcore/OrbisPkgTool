@@ -169,6 +169,41 @@ public sealed class PfsReader : IDisposable
     }
 
     /// <summary>
+    /// Copies a PFS file directly to <paramref name="destination"/>. This is
+    /// the extraction fast path: each decrypted PFS block is written once,
+    /// avoiding both a full-file allocation and the extra copy through
+    /// <see cref="PfsFileStream"/> used by general-purpose stream consumers.
+    /// </summary>
+    public void CopyFileTo(PfsInode ino, Stream destination,
+        System.Threading.CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (!destination.CanWrite)
+            throw new ArgumentException("Destination stream must be writable.", nameof(destination));
+
+        long remaining = ino.Size;
+        byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)BlockSize);
+        try
+        {
+            foreach (int block in EnumerateBlocks(ino))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (block <= 0 || remaining <= 0)
+                    break;
+
+                ReadBlockInto(block, buffer);
+                int count = (int)Math.Min(BlockSize, remaining);
+                destination.Write(buffer, 0, count);
+                remaining -= count;
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
     /// Enumerates the data block numbers of an inode (direct + indirect).
     /// Standard Unix indirection: db[0..11] direct; ib[0] single-indirect;
     /// ib[1] doubly-indirect; ib[2] triply-indirect, etc.
@@ -261,6 +296,8 @@ public sealed class PfsReader : IDisposable
         private readonly int[] _blocks;
         private readonly long _length;
         private long _position;
+        private long _cachedBlockIndex = -1;
+        private readonly byte[] _cachedBlock = new byte[(int)BlockSize];
 
         public PfsFileStream(PfsReader pfs, PfsInode ino, long length)
         {
@@ -284,7 +321,7 @@ public sealed class PfsReader : IDisposable
                 long blockIndex = _position / BlockSize;
                 if (blockIndex >= _blocks.Length) break;
                 int inBlock = (int)(_position % BlockSize);
-                byte[] block = _pfs.ReadBlock(_blocks[blockIndex]);
+                byte[] block = GetBlock(blockIndex);
                 int take = (int)Math.Min(Math.Min(count, block.Length - inBlock), _length - _position);
                 Buffer.BlockCopy(block, inBlock, buffer, offset, take);
                 offset += take;
@@ -293,6 +330,16 @@ public sealed class PfsReader : IDisposable
                 total += take;
             }
             return total;
+        }
+
+        private byte[] GetBlock(long blockIndex)
+        {
+            if (_cachedBlockIndex == blockIndex)
+                return _cachedBlock;
+
+            _pfs.ReadBlockInto(_blocks[blockIndex], _cachedBlock);
+            _cachedBlockIndex = blockIndex;
+            return _cachedBlock;
         }
 
         public override long Seek(long offset, SeekOrigin origin)
@@ -318,7 +365,17 @@ public sealed class PfsReader : IDisposable
     /// <summary>Reads one 0x10000-byte block, XTS-decrypting it when the PFS is encrypted.</summary>
     public byte[] ReadBlock(int block)
     {
-        byte[] data = _reader.ReadBytesAt(_pfsOffset + (long)block * BlockSize, (int)BlockSize);
+        byte[] data = new byte[BlockSize];
+        ReadBlockInto(block, data);
+        return data;
+    }
+
+    /// <summary>Reads and decrypts a PFS block into a reusable caller buffer.</summary>
+    private void ReadBlockInto(int block, byte[] data)
+    {
+        if (data.Length < BlockSize)
+            throw new ArgumentException($"Buffer must be at least {BlockSize} bytes.", nameof(data));
+        _reader.ReadBytesAt(_pfsOffset + (long)block * BlockSize, data, 0, (int)BlockSize);
         if (_xts != null)
         {
             for (int sector = block * 16; sector < block * 16 + 16; sector++)
@@ -328,7 +385,6 @@ public sealed class PfsReader : IDisposable
                         _xts.DataDecryptor, _xts.TweakEncryptor);
             }
         }
-        return data;
     }
 
     /// <summary>Reads the dirents of a directory inode, returning child entries.</summary>

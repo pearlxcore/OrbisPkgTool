@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Compression;
 
 namespace OrbisPkgTool.Pfs;
@@ -147,10 +148,13 @@ public sealed class PFSCStream : Stream
         int blockSize = (int)_header.BlockSize;
 
         _source.Position = start;
-        var compressed = new byte[compressedSize];
+        // This buffer is only needed while a block is decompressed.  Renting it
+        // avoids one short-lived allocation for every PFSC block during a full
+        // extraction; the returned output remains an owned array as before.
+        byte[] compressed = ArrayPool<byte>.Shared.Rent(compressedSize);
         try
         {
-            ReadFully(_source, compressed);
+            ReadFully(_source, compressed.AsSpan(0, compressedSize));
         }
         catch (EndOfStreamException)
         {
@@ -158,52 +162,65 @@ public sealed class PFSCStream : Stream
                 $"PFSC block {index}: read {compressedSize} bytes at 0x{start:X} " +
                 $"(file length {_source.Length}); offsets may be relative to the outer PFS.");
         }
-
-        if (compressedSize == blockSize)
-            return compressed; // stored raw
-
-        // Last block may be shorter than blockSize after decompression.
-        long totalBlocks = _blockCount;
-        int expected = (index + 1 < totalBlocks)
-            ? blockSize
-            : (int)(_header.RoundedFileSize - (ulong)((totalBlocks - 1) * blockSize));
-        var output = new byte[expected];
-        // Detect format: zlib-wrapped (RFC 1950) starts with 0x78; raw deflate doesn't.
-        using var decompressed = new MemoryStream(compressed);
-        bool isZlib = compressed.Length >= 2 && (compressed[0] & 0x0F) == 0x08;
-        using var decompressor = isZlib
-            ? (Stream)new ZLibStream(decompressed, CompressionMode.Decompress, leaveOpen: true)
-            : new DeflateStream(decompressed, CompressionMode.Decompress, leaveOpen: true);
-        int read = 0;
-        while (read < expected)
+        try
         {
-            int n = decompressor.Read(output, read, expected - read);
-            if (n <= 0) break;
-            read += n;
-        }
-        if (read < expected)
-            Array.Resize(ref output, read);
+            if (compressedSize == blockSize)
+            {
+                // A rented array cannot escape this method.  Preserve the
+                // previous owned-array contract for stored/raw blocks.
+                var raw = new byte[blockSize];
+                Buffer.BlockCopy(compressed, 0, raw, 0, blockSize);
+                if (index < MetaCacheSlots) _cache[index] = raw;
+                return raw;
+            }
 
-        // Optional trailer check: the last 4 bytes of the compressed block are
-        // the big-endian Adler-32 of the DECOMPRESSED data (RFC1950). The .NET
-        // deflate streams never validate this, so a flipped bit decompresses
-        // silently wrong without this check.
-        if (_verifyChecksums && compressedSize >= 6)
+            // Last block may be shorter than blockSize after decompression.
+            long totalBlocks = _blockCount;
+            int expected = (index + 1 < totalBlocks)
+                ? blockSize
+                : (int)(_header.RoundedFileSize - (ulong)((totalBlocks - 1) * blockSize));
+            var output = new byte[expected];
+            // Detect format: zlib-wrapped (RFC 1950) starts with 0x78; raw deflate doesn't.
+            using var decompressed = new MemoryStream(compressed, 0, compressedSize, writable: false, publiclyVisible: true);
+            bool isZlib = compressedSize >= 2 && (compressed[0] & 0x0F) == 0x08;
+            using var decompressor = isZlib
+                ? (Stream)new ZLibStream(decompressed, CompressionMode.Decompress, leaveOpen: true)
+                : new DeflateStream(decompressed, CompressionMode.Decompress, leaveOpen: true);
+            int read = 0;
+            while (read < expected)
+            {
+                int n = decompressor.Read(output, read, expected - read);
+                if (n <= 0) break;
+                read += n;
+            }
+            if (read < expected)
+                Array.Resize(ref output, read);
+
+            // Optional trailer check: the last 4 bytes of the compressed block are
+            // the big-endian Adler-32 of the DECOMPRESSED data (RFC1950). The .NET
+            // deflate streams never validate this, so a flipped bit decompresses
+            // silently wrong without this check.
+            if (_verifyChecksums && compressedSize >= 6)
+            {
+                uint stored = ((uint)compressed[compressedSize - 4] << 24)
+                    | ((uint)compressed[compressedSize - 3] << 16)
+                    | ((uint)compressed[compressedSize - 2] << 8)
+                    | compressed[compressedSize - 1];
+                uint actual = Adler32(output);
+                if (stored != actual)
+                    throw new InvalidDataException(
+                        $"PFSC block {index}: Adler-32 mismatch (stored 0x{stored:X8}, " +
+                        $"computed 0x{actual:X8}) — the PFSC image is corrupt.");
+            }
+
+            // Only cache first 64 blocks (metadata: header, inodes, dirents)
+            if (index < MetaCacheSlots) _cache[index] = output;
+            return output;
+        }
+        finally
         {
-            uint stored = ((uint)compressed[compressedSize - 4] << 24)
-                | ((uint)compressed[compressedSize - 3] << 16)
-                | ((uint)compressed[compressedSize - 2] << 8)
-                | compressed[compressedSize - 1];
-            uint actual = Adler32(output);
-            if (stored != actual)
-                throw new InvalidDataException(
-                    $"PFSC block {index}: Adler-32 mismatch (stored 0x{stored:X8}, " +
-                    $"computed 0x{actual:X8}) — the PFSC image is corrupt.");
+            ArrayPool<byte>.Shared.Return(compressed);
         }
-
-        // Only cache first 64 blocks (metadata: header, inodes, dirents)
-        if (index < MetaCacheSlots) _cache[index] = output;
-        return output;
     }
 
     /// <summary>
@@ -237,6 +254,17 @@ public sealed class PFSCStream : Stream
         while (read < buffer.Length)
         {
             int n = s.Read(buffer, read, buffer.Length - read);
+            if (n <= 0) throw new EndOfStreamException();
+            read += n;
+        }
+    }
+
+    private static void ReadFully(Stream s, Span<byte> buffer)
+    {
+        int read = 0;
+        while (read < buffer.Length)
+        {
+            int n = s.Read(buffer[read..]);
             if (n <= 0) throw new EndOfStreamException();
             read += n;
         }
