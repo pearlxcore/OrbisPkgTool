@@ -8,6 +8,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>OrbisPkgTool.Gui</AssemblyName>
     <RootNamespace>OrbisPkgTool.Gui</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
   </PropertyGroup>
 
   <!-- In-process metadata summary: PkgReader.GetInfo() -->
