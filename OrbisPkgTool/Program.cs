@@ -1512,12 +1512,13 @@ static void RunGp4Gen(string[] args)
 {
     string? folder = null, outFile = null, title = null, titleId = null, contentId = null, passcode = "";
     string? pfscProfilePath = null;
-    bool isPatch = false;
+    bool isPatch = false, strictGengp4 = false;
     for (int i = 0; i < args.Length; i++)
     {
         switch (args[i])
         {
             case "--patch": isPatch = true; break;
+            case "--strict-gengp4": strictGengp4 = true; break;
             case "--out" when i + 1 < args.Length: outFile = args[++i]; break;
             case "--title" when i + 1 < args.Length: title = args[++i]; break;
             case "--title-id" when i + 1 < args.Length: titleId = args[++i]; break;
@@ -1531,7 +1532,7 @@ static void RunGp4Gen(string[] args)
     }
     if (folder == null || !Directory.Exists(folder))
     {
-        Console.Error.WriteLine("usage: gp4gen <folder> [--patch] [--title X] [--title-id X] [--content-id X] [--passcode X] [--out file.gp4]");
+        Console.Error.WriteLine("usage: gp4gen <folder> [--patch] [--strict-gengp4] [--title X] [--title-id X] [--content-id X] [--passcode X] [--out file.gp4]");
         Console.Error.WriteLine("              [--pfsc-profile <pfsc_profile.json>]   (replay original compression policy)");
         Environment.ExitCode = 2;
         return;
@@ -1544,13 +1545,13 @@ static void RunGp4Gen(string[] args)
             profile = OrbisPkgTool.Pfs.PfscProfiler.ParseJson(File.ReadAllText(pfscProfilePath));
             Console.WriteLine($"Loaded PFSC profile: {profile.Count} files ({profile.Values.Count(p => p == OrbisPkgTool.Pfs.PfscPolicy.Disable)} disabled)");
         }
-        var proj = OrbisPkgTool.Gp4.Gp4Project.FromFolder(folder, isPatch, title, titleId, contentId, passcode, profile);
+        var proj = OrbisPkgTool.Gp4.Gp4Project.FromFolder(folder, isPatch, title, titleId, contentId, passcode, profile, strictGengp4);
         string xml = proj.Serialize();
         if (outFile != null)
         {
             File.WriteAllText(outFile, xml);
             int disabled = proj.Files.Count(f => f.PfsCompression.Equals("disable", StringComparison.OrdinalIgnoreCase));
-            Console.WriteLine($"Wrote {outFile} ({proj.Files.Count} files, {(isPatch ? "patch" : "app")}, {disabled} pfs_compression=disable)");
+            Console.WriteLine($"Wrote {outFile} ({proj.Files.Count} files, {(isPatch ? "patch" : "app")}{(strictGengp4 ? ", strict-gengp4" : "")}, {disabled} pfs_compression=disable)");
         }
         else
         {
@@ -3330,6 +3331,7 @@ gp4gen : Create a GP4 project file from a folder of game files
   Options:
     --out <out.gp4>        output file (default: print GP4 to console)
     --patch                make a patch project instead of a base app
+    --strict-gengp4        omit Sony-managed system targets to match gengp4's GP4 list
     --title <name>         game title
     --title-id <id>        title ID (e.g. CUSA00001)
     --content-id <id>      content ID (e.g. EP0001-CUSA00001_00-MYGAME000000001)

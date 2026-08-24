@@ -219,7 +219,8 @@ public sealed class Gp4Project
     /// </summary>
     public static Gp4Project FromFolder(string folder, bool isPatch, string? title = null,
         string? titleId = null, string? contentId = null, string passcode = "",
-        IReadOnlyDictionary<string, OrbisPkgTool.Pfs.PfscPolicy>? pfscProfile = null)
+        IReadOnlyDictionary<string, OrbisPkgTool.Pfs.PfscPolicy>? pfscProfile = null,
+        bool strictGengp4 = false)
     {
         // Read metadata from the embedded param.sfo if present and not
         // overridden on the command line.
@@ -238,6 +239,8 @@ public sealed class Gp4Project
         foreach (var f in files)
         {
             string rel = Path.GetRelativePath(folder, f).Replace('\\', '/');
+            if (strictGengp4 && IsGengp4ManagedSystemTarget(rel))
+                continue;
             string comp = "";
             if (pfscProfile != null && pfscProfile.TryGetValue(
                     OrbisPkgTool.Pfs.PfscProfiler.NormalizeKey(rel), out var policy))
@@ -254,6 +257,33 @@ public sealed class Gp4Project
             proj.Files.Add(new Gp4File { TargPath = rel + "/", OrigPath = rel + "/" });
         }
         return proj;
+    }
+
+    /// <summary>
+    /// gengp4 deliberately omits these Sony-managed system targets from the
+    /// project file. Publisher Tools recreates them while building the PKG.
+    /// Keep this policy opt-in: the normal generator remains content-explicit.
+    /// </summary>
+    private static bool IsGengp4ManagedSystemTarget(string path)
+    {
+        path = path.Replace('\\', '/');
+        if (path.StartsWith("sce_discmap", StringComparison.OrdinalIgnoreCase) &&
+            path.EndsWith(".plt", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return path.Equals("sce_sys/icon0.dds", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/pic0.dds", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/pic1.dds", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/license.dat", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/license.dat.encrypted", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/license.info", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/license.info.encrypted", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/playgo-chunk.dat", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/playgo-chunk.sha", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/playgo-manifest.xml", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/app/playgo-chunk.dat", StringComparison.OrdinalIgnoreCase) ||
+               path.Equals("sce_sys/psreserved.dat", StringComparison.OrdinalIgnoreCase) ||
+               path.StartsWith("sce_sys/about/", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
