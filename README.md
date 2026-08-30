@@ -1,294 +1,256 @@
 # OrbisPkgTool
 
-C#/.NET 10 tool for working with PS4 fake PKGs (FPKGs).
+OrbisPkgTool is a C#/.NET 10 toolkit for PS4 fake PKGs. It includes a command-line tool and a Windows Forms front end.
 
-It can read, extract, validate, build, repack, and merge packages without needing `orbis-pub-cmd.exe` or LibOrbisPkg at runtime.
+The built-in reader and builder handle PKG, PFS, PFSC, package crypto, and compression without requiring LibOrbisPkg or `orbis-pub-cmd.exe` at runtime. `orbis-pub-cmd.exe` is still supported as an optional reference build path.
 
-PKG, PFS, PFSC, crypto, and compression support are implemented in the project. `zlib1.dll` is optional and is used for PFSC compression when available. SharpZipLib is used as a fallback.
+## Features
 
-The project also includes:
+- List package contents and inspect PKG metadata
+- Extract a full package or a single `Sc0` or `Image0` file
+- Run a deep 8-stage structural validation
+- Build FPKGs directly from a GP4 project
+- Generate app or patch GP4 projects from a folder
+- Generate strict `gengp4`-style file lists with `--strict-gengp4`
+- Repack an app PKG in one command
+- Merge a base game and update into one self-contained base-app PKG
+- Preserve per-file PFSC compression choices when repacking or merging
+- Use parallel PFSC compression for faster builds
+- Read, create, edit, and validate `param.sfo` files
+- List, extract, and create trophy `.trp` archives
+- Decode ATRAC9 `.at9` audio to WAV
+- Check PSN for official game updates
+- Run package diagnostics and compatibility checks
+- Use the same operations from the Windows Forms GUI
 
-- ATRAC9 `.at9` to WAV decoding
-- PSN official update checking
-- PKG header and entry inspection tools
-- GP4 generation
-- trophy TRP tools
-- param.sfo tools
-- a WinForms GUI
+## Current merge workflow
 
-The compatibility code has been tested against real FPKGs and `orbis-pub-cmd 3.87`. The current test suite has 83 xUnit tests.
+The `merge` command checks that the first package is a base game, the second is a patch, and both use the same title ID. It then:
+
+1. Extracts the base package.
+2. Extracts the update package.
+3. Overlays the update files.
+4. Moves `Sc0` into `Image0/sce_sys`.
+5. Generates a new GP4 project.
+6. Builds the merged package.
+7. Optionally validates the result.
+
+The merge service reports the current pipeline step, per-file extraction progress, build byte progress, and validation sub-stage progress through `PkgMergeProgress`.
+
+The output keeps the base package type and uses the update version. It is sealed with the default all-zero passcode. The base and update may use separate input passcodes.
 
 ## Projects
 
 ```text
-OrbisPkgTool/                        class library (net10.0-windows) + CLI
-                                     entry point (Program.cs)
-  PkgReader.cs                       ListFiles / ExtractFile /
-                                     ExtractEntryBytes / ExtractAll /
-                                     OpenRawPfscStream / InnerPfs
-  PkgFileEntry.cs                    file listing model
-  PkgInfo.cs                         package metadata
-  Pkg/PkgHeader.cs                   PKG header
-  Pkg/PkgEntry.cs                    entry table and known entry IDs/names
-  Pkg/PkgBuilder.cs                  in-memory and streaming PKG builder
-  Pkg/BuildOptions.cs                build options
-  Pkg/PkgValidator.cs                structural validation
-  Pkg/PkgHeaderDump.cs               46-row header dump for A/B comparison
-  Crypto/PkgCrypto.cs                passcode and package crypto
-  Crypto/PkgKeySet.cs                RSA/fake PKG key material
-  Gp4/Gp4Project.cs                  GP4 parse, serialize, and generation
-  Media/                             ATRAC9 decoder
-  Psn/UpdateCheck.cs                 PSN update checking
-  Pfs/PfsFormat.cs                   PFS format constants
-  Pfs/PfsReader.cs                   PFS reader
-  Pfs/PfsWriter.cs                   PFS writer
-  Pfs/PFSCStream.cs                  PFSC decompression
-  Pfs/PFSCWriter.cs                  PFSC writer
-  Pfs/PfscDeflate.cs                 PFSC deflate support
-  Pfs/PfscProfiler.cs                compression policy profiler
-  Sfo/ParamSfo.cs                    param.sfo read/serialize
-  Trp/Trp.cs                         trophy TRP read/create
-  Util/MersenneTwister.cs            MT19937 used by package crypto
-
-OrbisPkgTool.Gui/                    Windows Forms GUI
-OrbisPkgTool.Tests/                  xUnit tests
+OrbisPkgTool.slnx
+OrbisPkgTool/
+  OrbisPkgTool.csproj       CLI and reusable package library
+  PkgReader.cs              package listing and extraction
+  PkgMergeService.cs        base and update merge pipeline
+  Pkg/                      package builder, validator, and format types
+  Pfs/                      PFS and PFSC readers, writers, and profiler
+  Gp4/                      GP4 parsing and generation
+  Crypto/                   package crypto and key handling
+  Sfo/                      param.sfo support
+  Trp/                      trophy archive support
+  Media/                    ATRAC9 decoder
+  Psn/                      PSN update checking
+OrbisPkgTool.Gui/
+  OrbisPkgTool.Gui.csproj   Windows Forms front end
 ```
 
-## Commands
+## Build
+
+Requirements:
+
+- Windows
+- .NET 10 SDK
+
+Build both the CLI and GUI from the repository root:
+
+```powershell
+dotnet build OrbisPkgTool.slnx
+```
+
+Build only the CLI:
+
+```powershell
+dotnet build OrbisPkgTool/OrbisPkgTool.csproj
+```
+
+SharpZipLib is restored from NuGet. A native `zlib1.dll` is optional and is used for PFSC compression when found. The search order is:
+
+- `%ORBISPKG_ZLIB%`
+- the executable directory
+- common Git for Windows `mingw64` directories
+- `PATH`
+
+SharpZipLib is used when native zlib is unavailable.
+
+## Common commands
 
 ```text
-list        List files in a PKG
-extract     Extract files from a PKG
-verify      Verify PKG hashes/signatures
-info        Show PKG metadata
-inspect     Dump the PFS tree
+info        Show title, IDs, version, and package type
+list        List files and folders
+extract     Extract a package or one file
 entries     Dump the raw PKG entry table
-validate    Run structural validation
-build       Build a fake PKG from GP4
-orbis-build Build a fake PKG using orbis-pub-cmd
-repack      Extract, restructure, generate GP4, and rebuild
-merge       Merge a base PKG and update PKG
-gp4gen      Generate GP4 from a folder
-restructure Prepare a dump for building
-sweep       Batch verify PKGs in a folder
-bench       Benchmark listing speed
-selftest    Validate RSA keys
-sfo         param.sfo tools
-trp         Trophy TRP tools
+validate    Run the deep 8-stage validator
+verify      Check package hashes and signatures
+sweep       Check all PKGs under a folder
+gp4gen      Generate a GP4 project from a folder
+build       Build a package from GP4
+orbis-build Build through orbis-pub-cmd
+repack      Extract and rebuild an app package
+merge       Merge a base game and update
+restructure Prepare an extracted dump for building
+sfo         Work with param.sfo files
+trp         Work with trophy archives
+inspect     Dump the PFS tree
+bench       Measure listing speed
+selftest    Check the built-in crypto keys
 ```
 
-Use `-h` on commands that have extra options.
+Run `OrbisPkgTool.exe <command> --help` for the full options accepted by a command.
 
-### Diagnostic commands
+The default fake-PKG passcode is:
 
 ```text
-pfscprofile    PFSC compression stats and per-file policy
-shadps4diag    Step through shadPS4-style PKG reading
-s4trace        shadPS4Plus allocation/bounds trace
-s4extract      shadPS4Plus-style extraction
-s4crypto       shadPS4 crypto chain checks
-pkgfields      Dump PKG header/entry fields for comparison
-
-signverify
-pfsdump
-pfsblock
-innerfpt
-iblock
-fixdigests
-resignpfs
-xtstest
-buildtest
-emptypayload
-pfscompare
-dumppfsc
-xtsdump
-inflatecheck
-deftest
-blkcount
+00000000000000000000000000000000
 ```
 
 ## Examples
 
-### List files
+### Inspect and extract
 
 ```powershell
+OrbisPkgTool.exe info game.pkg
 OrbisPkgTool.exe list game.pkg
+OrbisPkgTool.exe extract game.pkg extracted
+OrbisPkgTool.exe extract game.pkg:Sc0/param.sfo extracted
+OrbisPkgTool.exe extract game.pkg:Image0/eboot.bin extracted
 ```
 
-### Extract a package
+Unicode paths are supported. When starting the tool from another application, use `ProcessStartInfo` instead of passing the command through `cmd.exe`.
+
+### Validate
 
 ```powershell
-OrbisPkgTool.exe extract --passcode 00000000000000000000000000000000 game.pkg out/
+OrbisPkgTool.exe validate game.pkg
+OrbisPkgTool.exe validate --fake-tolerant scene_fpkg.pkg
 ```
 
-Unicode paths are handled by the application. If launching from another app, use `ProcessStartInfo` instead of going through `cmd.exe`.
-
-### Extract a single file
-
-```powershell
-OrbisPkgTool.exe extract game.pkg:Sc0/param.sfo out/
-OrbisPkgTool.exe extract game.pkg:Image0/eboot.bin out/
-```
-
-### Validate a package
-
-```powershell
-OrbisPkgTool.exe validate --passcode 00000000000000000000000000000000 game.pkg
-```
-
-For scene FPKGs with bad or leftover entry digests/signatures:
-
-```powershell
-OrbisPkgTool.exe validate --fake-tolerant game.pkg
-```
-
-`--fake-tolerant` skips the checks that commonly fail on repacked scene packages while still running the other validation stages.
+The validator checks the header, entry table, outer PFS, PFSC, inner PFS, digests, signatures, and filesystem walk. `--fake-tolerant` treats zeroed digests or signatures often found in scene FPKGs as warnings. Non-zero mismatches still fail.
 
 ### Generate a GP4
 
 ```powershell
-OrbisPkgTool.exe gp4gen ./Image0 --title "My Game" --title-id CUSA00001 --out game.gp4
+OrbisPkgTool.exe gp4gen Image0 --out project.gp4
+OrbisPkgTool.exe gp4gen Image0 --strict-gengp4 --out project.gp4
+OrbisPkgTool.exe gp4gen Image0 --patch --out patch.gp4
 ```
 
-### Build a fake PKG
+Metadata is read from `sce_sys/param.sfo` when available. `--strict-gengp4` omits Sony-managed system targets so the generated file list matches the layout produced by `gengp4` more closely.
+
+### Build
 
 ```powershell
-OrbisPkgTool.exe build game.gp4 ./Image0 --out game.pkg --passcode 00000000000000000000000000000000 --validate
+OrbisPkgTool.exe build project.gp4 Image0 --out game.pkg --validate
+OrbisPkgTool.exe build project.gp4 Image0 --out game.pkg --workers 0
 ```
 
-The builder uses the `pfs_compression` values from the GP4.
+The default PFSC mode is `compressed`. Use `--pfsc-mode store` to disable PFSC compression. Worker count `1` is the serial default, while `0` uses all available processors.
 
-### Repack a package
+### Repack
 
 ```powershell
-OrbisPkgTool.exe repack original.pkg --out rebuilt.pkg
+OrbisPkgTool.exe repack original.pkg --out rebuilt.pkg --validate
 ```
 
-This extracts the package, restructures the files, generates a GP4, and builds a new package.
+Repacking extracts the package, restructures the dump, generates a GP4, and builds a new package. In compressed mode, it profiles the original PFSC block layout and carries the effective per-file compression policy into the new build.
 
-The original per-file PFSC compression policy is also copied into the generated GP4.
+Use `--keep-work` to retain intermediate files. By default, the temporary work directory is removed after a successful build when the output is stored elsewhere.
 
-### Merge a base and update
+### Merge a base game and update
 
 ```powershell
 OrbisPkgTool.exe merge "Game [CUSA00001] 00 - Base.pkg" "Game [CUSA00001] 01 - Update v01.09.pkg" --out merged.pkg --validate
 ```
 
-`merge` extracts the base and update, overlays the update files on the base, and rebuilds them as one base-app PKG.
+Useful merge options include:
 
-The base `CATEGORY=gd` is kept. `APP_VER` and `VERSION` are taken from the update. The output uses the default passcode.
+```text
+--passcode <code>          shared input passcode
+--base-passcode <code>     passcode used only for the base
+--update-passcode <code>   passcode used only for the update
+--pfsc-mode <mode>         compressed or store
+--workers <n>              PFSC compression workers
+--work-dir <folder>        parent folder for merge workspace
+--keep-work                keep intermediate files on success
+--validate                 validate the output package
+```
 
-### Check PFSC compression policy
+In compressed mode, the merged build combines the base and update compression profiles. Update entries replace matching base entries.
+
+### Profile PFSC compression
 
 ```powershell
 OrbisPkgTool.exe pfscprofile original.pkg --out pfsc_profile.json
 OrbisPkgTool.exe pfscprofile rebuilt.pkg --ref original.pkg
 ```
 
-The saved JSON can also be used with `gp4gen --pfsc-profile`.
-
-## Passcode
-
-Default passcode:
-
-```text
-00000000000000000000000000000000
-```
-
-If the passcode is wrong:
-
-```text
-Passcode mismatch.
-```
-
-For official/retail PKGs, the library can recover `dk3` from `ENTRY_KEYS[3]` using the included key material. This allows supported key-index-3 Sc0 entries such as `npbind.dat` and `license.dat` to be decrypted without the package passcode.
+The saved profile can be passed to `gp4gen --pfsc-profile`.
 
 ## C# API
 
 ```csharp
+using OrbisPkgTool;
+using OrbisPkgTool.Pkg;
+
 using var pkg = new PkgReader(@"C:\Games\game.pkg");
 
-foreach (var f in pkg.ListFiles())
+foreach (var file in pkg.ListFiles())
 {
-    Console.WriteLine($"{(f.IsDirectory ? 'D' : 'F')} {f.Size} {f.Path}");
+    Console.WriteLine($"{file.Size,12} {file.Path}");
 }
 
-pkg.ExtractFile("Sc0/changeinfo/changeinfo.xml", outDir);
-pkg.ExtractAll(outDir);
-
-byte[] sfo = pkg.ExtractEntryBytes(0x00001000);
+pkg.ExtractFile("Sc0/changeinfo/changeinfo.xml", "extracted");
+pkg.ExtractAll("extracted");
 
 PkgBuilder.Build(
-    "game.gp4",
-    "./Image0",
+    "project.gp4",
+    "Image0",
     "game.pkg",
     new BuildOptions
     {
         PfscMode = PfscMode.Compressed,
+        Workers = 0,
         Validate = true
     });
 ```
 
-## Compression policy replay
+The merge pipeline is also available as `PkgMergeService`. Supply an `IProgress<PkgMergeProgress>` callback if your application needs step, file, byte, or validation progress.
 
-When repacking, OrbisPkgTool reads the original package's per-file PFSC compression settings and writes them into the generated GP4 as `pfs_compression` values.
+## Compatibility notes
 
-`PfscProfiler` gets this information from the PFSC block table and inner PFS allocation data.
+The reader and builder have been compared with packages produced by `orbis-pub-cmd 3.87`. Testing has covered full extraction, single and multi-block files, doubly indirect files, GP4 file lists, PFSC compression policy replay, rebuilt package validation, and Unicode filenames.
 
-Files with compression disabled are stored as raw PFSC blocks. Other files are compressed normally.
+These are PC-side compatibility checks. Hardware testing is a separate step.
 
-The in-memory and streaming build paths use the same policy.
+Official retail PKGs are not the main target. For supported packages, the reader can recover `dk3` from `ENTRY_KEYS[3]` and decrypt key-index-3 `Sc0` entries such as `npbind.dat` and `license.dat` without the package passcode.
 
-PFSC compression uses a 4 KiB deflate window. If `zlib1.dll` is available it is used with `windowBits=-12`. Otherwise SharpZipLib is used.
+## Diagnostics
 
-## Validation
+Low-level commands used while investigating package compatibility are still included:
 
-The tool has been compared with `orbis-pub-cmd 3.87` using several packages, including:
-
-- Digimon World: Next Order (`CUSA05392`)
-- an official Disgaea 1 Complete patch
-- Yooka-Laylee and the Impossible Lair (`CUSA16139`)
-
-Current results:
-
-| Check | Result |
-|---|---|
-| `img_file_list` paths, Digimon, 757 entries | no differences |
-| `img_file_list` file sizes, Digimon, 488 files | no differences |
-| Sc0 `param.sfo` extraction | same SHA256 |
-| Image0 single-block file | same SHA256 |
-| Image0 multi-block `eboot.bin` | same SHA256 |
-| Image0 doubly-indirect `archive.psarc` | same SHA256 |
-| Full Digimon extraction, 488 files / about 12 GB | completed without errors |
-| Wrong passcode handling | same `Passcode mismatch.` result |
-| Unicode filename handling | works in OrbisPkgTool where the tested Sony tool failed |
-| `img_verify` on rebuilt Yooka package | passes with the same expected R4211/R4124 warnings as the original |
-| Rebuilt Yooka extraction | 1081/1081 files matched |
-| PFSC policy comparison | 0 mismatches across 1046 files |
-
-These are PC-side checks. Actual console testing is still separate.
-
-## Requirements
-
-- .NET 10 SDK for building
-- .NET 10 runtime for running
-- Windows
-- optional `zlib1.dll` for PFSC compression
-- xUnit for the test project
-
-Run tests with:
-
-```powershell
-dotnet test OrbisPkgTool.Tests/OrbisPkgTool.Tests.csproj
+```text
+pfscprofile shadps4diag s4trace s4extract s4crypto pkgfields
+signverify pfsdump pfsblock innerfpt iblock fixdigests resignpfs
+xtstest buildtest emptypayload pfscompare dumppfsc dumpinner
+xtsdump inflatecheck deftest blkcount
 ```
 
-The test project is not included in `OrbisPkgTool.slnx`, so run it directly.
+They are intended for format debugging rather than normal package work.
 
-`zlib1.dll` is searched for in:
+## License
 
-- `%ORBISPKG_ZLIB%`
-- next to the executable
-- Git for Windows `mingw64` locations
-- `PATH`
-
-If it is not found, SharpZipLib is used.
+MIT. See [LICENSE](LICENSE).
