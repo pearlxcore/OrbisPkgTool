@@ -36,7 +36,7 @@ public sealed record class PkgMergeRequest
 /// <summary>A progress update emitted by <see cref="PkgMergeService"/>.</summary>
 public sealed record PkgMergeProgress(string Stage, int CurrentItem = 0,
     int TotalItems = 0, string? CurrentFile = null, long CurrentBytes = 0,
-    long TotalBytes = 0)
+    long TotalBytes = 0, int Step = 0, int TotalSteps = 0)
 {
     public double? Percentage => TotalBytes > 0 ? 100d * CurrentBytes / TotalBytes :
         TotalItems > 0 ? 100d * CurrentItem / TotalItems : null;
@@ -76,29 +76,29 @@ public sealed class PkgMergeService
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            Report(request, "Extracting base PKG");
-            Extract(basePath, basePasscode, dumpBase, request, "Extracting base PKG");
+            Report(request, "Extracting base PKG", 1);
+            Extract(basePath, basePasscode, dumpBase, request, "Extracting base PKG", 1);
             var baseProfile = request.PfscMode == PfscMode.Compressed ? Profile(basePath, basePasscode) : null;
 
-            Report(request, "Extracting update PKG");
-            Extract(updatePath, updatePasscode, dumpUpdate, request, "Extracting update PKG");
+            Report(request, "Extracting update PKG", 2);
+            Extract(updatePath, updatePasscode, dumpUpdate, request, "Extracting update PKG", 2);
             var updateProfile = request.PfscMode == PfscMode.Compressed ? Profile(updatePath, updatePasscode) : null;
 
-            Report(request, "Overlaying update files");
+            Report(request, "Overlaying update files", 3);
             Overlay(dumpBase, dumpUpdate, updateInfo.AppVersion, ct);
             TryDeleteUpdateDump(dumpUpdate, request);
 
-            Report(request, "Restructuring merged files");
+            Report(request, "Restructuring merged files", 4);
             Restructure(dumpBase, ct);
             var profile = MergeProfiles(baseProfile, updateProfile);
 
-            Report(request, "Generating GP4 project");
+            Report(request, "Generating GP4 project", 5);
             string gp4Path = Path.Combine(workDir, "project.gp4");
             var project = Gp4Project.FromFolder(image0, false, request.Title, request.TitleId,
                 request.ContentId, PkgBuilder.DefaultPasscode, profile);
             File.WriteAllText(gp4Path, project.Serialize());
 
-            Report(request, "Building merged PKG");
+            Report(request, "Building merged PKG", 6);
             PkgBuilder.Build(gp4Path, image0, outputPath, new BuildOptions
             {
                 Passcode = PkgBuilder.DefaultPasscode,
@@ -109,15 +109,18 @@ public sealed class PkgMergeService
                 Workers = request.WorkerCount,
                 Quiet = true,
                 CancellationToken = ct,
-                Progress = (stage, done, total) => Report(request, $"Building: {stage}", currentBytes: done, totalBytes: total),
+                Progress = (stage, done, total) => Report(request, $"Building: {stage}", 6, currentBytes: done, totalBytes: total),
             });
             if (!File.Exists(outputPath)) throw new InvalidOperationException("PKG build completed without creating an output package.");
 
             if (request.ValidateAfterBuild)
             {
-                Report(request, "Validating merged PKG");
+                Report(request, "Validating merged PKG", 7);
                 PkgValidator.ValidatePkgFile(outputPath, PkgBuilder.DefaultPasscode,
-                    report: (stage, item) => Report(request, $"Validating: {stage}", currentFile: item));
+                    report: (stage, item) => Report(request, $"Validating: {stage}", 7,
+                        current: int.TryParse(stage, System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out int vs) ? vs - 1 : 0,
+                        total: ValidationStages, currentFile: item));
             }
             stopwatch.Stop();
             bool kept = KeepOrCleanup(workDir, outputPath, request.KeepWorkDirectory);
@@ -160,11 +163,11 @@ public sealed class PkgMergeService
         return Path.Combine(parent,
             $"pkg_merge_{safe[..Math.Min(40, safe.Length)]}_{Guid.NewGuid().ToString("N")[..12]}");
     }
-    private static void Extract(string pkg, string passcode, string output, PkgMergeRequest request, string stage)
+    private static void Extract(string pkg, string passcode, string output, PkgMergeRequest request, string stage, int step)
     {
         using var reader = new PkgReader(pkg, passcode); Directory.CreateDirectory(output);
         var failures = reader.ExtractAll(output,
-            new Progress<(int Current, int Total, string CurrentFile)>(p => Report(request, stage, p.Current, p.Total, p.CurrentFile)),
+            new Progress<(int Current, int Total, string CurrentFile)>(p => Report(request, stage, step, p.Current, p.Total, p.CurrentFile)),
             new ExtractAllOptions { CancellationToken = request.CancellationToken });
         if (failures.Count > 0) throw new InvalidOperationException($"{failures.Count} file(s) failed to extract: {string.Join("; ", failures.Take(3).Select(f => f.Path))}");
     }
@@ -203,9 +206,61 @@ public sealed class PkgMergeService
     {
         string image0 = Path.Combine(dump, "Image0"), sc0 = Path.Combine(dump, "Sc0"), sceSys = Path.Combine(image0, "sce_sys");
         if (!Directory.Exists(image0)) throw new InvalidOperationException("Base extraction does not contain Image0.");
-        if (Directory.Exists(sc0)) { Directory.CreateDirectory(sceSys); foreach (var file in Directory.GetFiles(sc0, "*", SearchOption.AllDirectories)) { ct.ThrowIfCancellationRequested(); string destination = Path.Combine(sceSys, Path.GetRelativePath(sc0, file)); Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Move(file, destination, true); } Directory.Delete(sc0, true); }
+        if (Directory.Exists(sc0))
+        {
+            Directory.CreateDirectory(sceSys);
+            foreach (var file in EnumerateFilesRecursively(sc0, ct))
+            {
+                ct.ThrowIfCancellationRequested();
+                string destination = Path.Combine(sceSys, Path.GetRelativePath(sc0, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Move(file, destination, true);
+            }
+            try
+            {
+                Directory.Delete(sc0, true);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed deleting Sc0 after merge: {ex.Message}", ex);
+            }
+        }
         string original = Path.Combine(sceSys, "param.sfo.original"); if (File.Exists(original)) File.Delete(original);
     }
+
+    /// <summary>
+    /// Recursive file enumeration that reports the exact directory where
+    /// Windows fails. <see cref="Directory.GetFiles(string, string, SearchOption)"/>
+    /// with AllDirectories throws "The parameter is incorrect" (Win32 87) with
+    /// only the root path when a nested entry has an invalid/trailing name;
+    /// walking per-level pins down the offending directory.
+    /// </summary>
+    private static IEnumerable<string> EnumerateFilesRecursively(string root, CancellationToken ct)
+    {
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            string dir = pending.Pop();
+            string[] files;
+            string[] subdirs;
+            try
+            {
+                files = Directory.GetFiles(dir);
+                subdirs = Directory.GetDirectories(dir);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Could not enumerate directory '{dir}': {ex.Message}", ex);
+            }
+            foreach (string f in files) yield return f;
+            foreach (string d in subdirs) pending.Push(d);
+        }
+    }
+
     private static void TryDeleteUpdateDump(string dumpUpdate, PkgMergeRequest request)
     {
         // The update has already been moved over the base at this stage. This
@@ -218,11 +273,11 @@ public sealed class PkgMergeService
         }
         catch (IOException ex)
         {
-            Report(request, "Update dump retained for cleanup", currentFile: ex.Message);
+            Report(request, "Update dump retained for cleanup", 3, currentFile: ex.Message);
         }
         catch (UnauthorizedAccessException ex)
         {
-            Report(request, "Update dump retained for cleanup", currentFile: ex.Message);
+            Report(request, "Update dump retained for cleanup", 3, currentFile: ex.Message);
         }
     }
     private static bool KeepOrCleanup(string workDir, string output, bool keep)
@@ -245,5 +300,15 @@ public sealed class PkgMergeService
             // Cleanup is best-effort; preserve the original merge outcome.
         }
     }
-    private static void Report(PkgMergeRequest r, string stage, int current = 0, int total = 0, string? currentFile = null, long currentBytes = 0, long totalBytes = 0) => r.Progress?.Report(new PkgMergeProgress(stage, current, total, currentFile, currentBytes, totalBytes));
+    private static void Report(PkgMergeRequest r, string stage, int step,
+        int current = 0, int total = 0, string? currentFile = null,
+        long currentBytes = 0, long totalBytes = 0) => r.Progress?.Report(
+        new PkgMergeProgress(stage, current, total, currentFile, currentBytes,
+            totalBytes, step, r.ValidateAfterBuild ? TotalStepsWithValidation : TotalStepsWithoutValidation));
+
+    /// <summary>Pipeline steps: 2 extractions, overlay, restructure, GP4, build (validation adds a 7th).</summary>
+    internal const int TotalStepsWithoutValidation = 6;
+    internal const int TotalStepsWithValidation = 7;
+    /// <summary>Validation sub-stages reported by PkgValidator ("1".."8").</summary>
+    internal const int ValidationStages = 8;
 }
