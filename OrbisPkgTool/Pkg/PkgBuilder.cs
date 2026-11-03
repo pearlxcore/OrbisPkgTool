@@ -53,7 +53,9 @@ public static class PkgBuilder
                 continue;
             }
             string src = ResolveSource(projectFolder, f.OrigPath);
-            if (!File.Exists(src)) continue;
+            if (!File.Exists(src))
+                throw new FileNotFoundException(
+                    $"Source file referenced by the GP4 is missing: '{f.TargPath}' (orig '{f.OrigPath}')", src);
             long len = new FileInfo(src).Length;
             totalSize += len;
             if (f.TargPath.StartsWith("sce_sys/", StringComparison.OrdinalIgnoreCase))

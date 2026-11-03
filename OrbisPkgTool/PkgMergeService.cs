@@ -186,11 +186,35 @@ public sealed class PkgMergeService
     }
     private static void Overlay(string baseDump, string updateDump, string updateVersion, CancellationToken ct)
     {
+        // The update SFO is the authoritative source for the merged version and
+        // required firmware. Read it before the update dump is deleted.
+        string? updateSfoPath = new[]
+        {
+            Path.Combine(updateDump, "Sc0", "param.sfo"),
+            Path.Combine(updateDump, "Image0", "sce_sys", "param.sfo"),
+        }.FirstOrDefault(File.Exists);
+        ParamSfo? updateSfo = null;
+        if (updateSfoPath != null)
+        {
+            try { updateSfo = ParamSfo.Parse(File.ReadAllBytes(updateSfoPath)); }
+            catch { /* best-effort: keep the base SFO if the update SFO is unreadable */ }
+        }
+
         foreach (string area in new[] { "Image0", "Sc0" })
         {
             string source = Path.Combine(updateDump, area); if (!Directory.Exists(source)) continue;
             string target = Path.Combine(baseDump, area);
-            foreach (string file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+
+            // Mirror the update's directory tree first: the file walk below
+            // creates parent dirs for files, but a patch that adds only a
+            // placeholder directory would otherwise lose it.
+            foreach (string directory in EnumerateDirectoriesRecursively(source, ct))
+            {
+                string relativeDir = Path.GetRelativePath(source, directory).Replace('\\', '/');
+                Directory.CreateDirectory(Path.Combine(target, relativeDir));
+            }
+
+            foreach (string file in EnumerateFilesRecursively(source, ct))
             {
                 ct.ThrowIfCancellationRequested(); string relative = Path.GetRelativePath(source, file).Replace('\\', '/');
                 bool sfo = area == "Sc0" && relative.Equals("param.sfo", StringComparison.OrdinalIgnoreCase) || area == "Image0" && relative.Equals("sce_sys/param.sfo", StringComparison.OrdinalIgnoreCase);
@@ -198,10 +222,27 @@ public sealed class PkgMergeService
                 string destination = Path.Combine(target, relative); Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Move(file, destination, true);
             }
         }
-        if (string.IsNullOrEmpty(updateVersion)) return;
+
+        // Keep the base identity (content id, title) but adopt the update's
+        // versions and required firmware. SYSTEM_VER must never go backwards:
+        // a patch that raises the firmware requirement must carry it over.
+        string? version = updateSfo?.GetString("APP_VER");
+        if (string.IsNullOrWhiteSpace(version)) version = updateSfo?.GetString("VERSION");
+        if (string.IsNullOrWhiteSpace(version)) version = updateVersion;
+        int updateSystemVersion = updateSfo?.GetInt("SYSTEM_VER") ?? 0;
+
         foreach (string sfoPath in new[] { Path.Combine(baseDump, "Sc0", "param.sfo"), Path.Combine(baseDump, "Image0", "sce_sys", "param.sfo") })
         {
-            if (!File.Exists(sfoPath)) continue; var sfo = ParamSfo.Parse(File.ReadAllBytes(sfoPath)); sfo.SetString("APP_VER", updateVersion, 8); sfo.SetString("VERSION", updateVersion, 8); File.WriteAllBytes(sfoPath, sfo.Serialize());
+            if (!File.Exists(sfoPath)) continue;
+            var sfo = ParamSfo.Parse(File.ReadAllBytes(sfoPath));
+            if (!string.IsNullOrWhiteSpace(version))
+            {
+                sfo.SetString("APP_VER", version, 8);
+                sfo.SetString("VERSION", version, 8);
+            }
+            if (updateSystemVersion > sfo.GetInt("SYSTEM_VER"))
+                sfo.SetInt("SYSTEM_VER", updateSystemVersion);
+            File.WriteAllBytes(sfoPath, sfo.Serialize());
         }
     }
     private static void Restructure(string dump, CancellationToken ct)
@@ -211,6 +252,15 @@ public sealed class PkgMergeService
         if (Directory.Exists(sc0))
         {
             Directory.CreateDirectory(sceSys);
+
+            // Mirror the Sc0 directory tree first so empty directories survive
+            // the file move.
+            foreach (string directory in EnumerateDirectoriesRecursively(sc0, ct))
+            {
+                string relativeDir = Path.GetRelativePath(sc0, directory).Replace('\\', '/');
+                Directory.CreateDirectory(Path.Combine(sceSys, relativeDir));
+            }
+
             foreach (var file in EnumerateFilesRecursively(sc0, ct))
             {
                 ct.ThrowIfCancellationRequested();
@@ -260,6 +310,37 @@ public sealed class PkgMergeService
             }
             foreach (string f in files) yield return f;
             foreach (string d in subdirs) pending.Push(d);
+        }
+    }
+
+    /// <summary>
+    /// Recursive directory enumeration with the same per-level error reporting
+    /// as <see cref="EnumerateFilesRecursively"/>. Yields subdirectories only,
+    /// never the root.
+    /// </summary>
+    private static IEnumerable<string> EnumerateDirectoriesRecursively(string root, CancellationToken ct)
+    {
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            string dir = pending.Pop();
+            string[] subdirs;
+            try
+            {
+                subdirs = Directory.GetDirectories(dir);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Could not enumerate directory '{dir}': {ex.Message}", ex);
+            }
+            foreach (string d in subdirs)
+            {
+                yield return d;
+                pending.Push(d);
+            }
         }
     }
 

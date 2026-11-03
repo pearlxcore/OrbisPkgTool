@@ -140,7 +140,9 @@ public sealed class Gp4Project
                         new XAttribute("content_id", ContentId ?? ""),
                         new XAttribute("passcode", pass),
                         new XAttribute("storage_type", StorageType),
-                        new XAttribute("app_type", AppType)),
+                        new XAttribute("app_type", AppType),
+                        new XAttribute("version", Version ?? ""),
+                        new XAttribute("app_version", AppVersion ?? "")),
                     new XElement("chunk_info",
                         new XAttribute("chunk_count", "1"),
                         new XAttribute("scenario_count", "1"),
@@ -224,7 +226,8 @@ public sealed class Gp4Project
     {
         // Read metadata from the embedded param.sfo if present and not
         // overridden on the command line.
-        TryReadSfo(folder, ref title, ref titleId, ref contentId);
+        string? appVersion = null, version = null;
+        TryReadSfo(folder, ref title, ref titleId, ref contentId, ref appVersion, ref version);
 
         var proj = new Gp4Project
         {
@@ -233,10 +236,11 @@ public sealed class Gp4Project
             Title = title ?? Path.GetFileName(folder.TrimEnd('/', '\\')),
             TitleId = titleId ?? "",
             ContentId = contentId ?? "",
+            AppVersion = string.IsNullOrWhiteSpace(appVersion) ? "01.00" : appVersion,
+            Version = string.IsNullOrWhiteSpace(version) ? "01.00" : version,
         };
-        var files = Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories)
-            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
-        foreach (var f in files)
+        var (files, directories) = WalkTree(folder);
+        foreach (var f in files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
         {
             string rel = Path.GetRelativePath(folder, f).Replace('\\', '/');
             if (strictGengp4 && IsGengp4ManagedSystemTarget(rel))
@@ -250,13 +254,49 @@ public sealed class Gp4Project
         // EMPTY directories exist in the source tree (e.g. patch PKGs carry
         // mono/etc/ dirs with no files). Encode them as trailing-slash paths —
         // the builder synthesizes them into the PFS tree (see PfsWriter).
-        foreach (var d in Directory.EnumerateDirectories(folder, "*", SearchOption.AllDirectories))
+        foreach (var d in directories.OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
         {
             if (Directory.EnumerateFileSystemEntries(d).Any()) continue; // not empty
             string rel = Path.GetRelativePath(folder, d).Replace('\\', '/');
             proj.Files.Add(new Gp4File { TargPath = rel + "/", OrigPath = rel + "/" });
         }
         return proj;
+    }
+
+    /// <summary>
+    /// Enumerates a tree one directory at a time. SearchOption.AllDirectories
+    /// throws a generic "The parameter is incorrect" (Win32 87) when a nested
+    /// entry has an invalid/trailing name; walking per level pins down the
+    /// offending directory.
+    /// </summary>
+    private static (List<string> Files, List<string> Directories) WalkTree(string root)
+    {
+        var files = new List<string>();
+        var directories = new List<string>();
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            string dir = pending.Pop();
+            string[] currentFiles, subdirectories;
+            try
+            {
+                currentFiles = Directory.GetFiles(dir);
+                subdirectories = Directory.GetDirectories(dir);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Could not enumerate directory '{dir}': {ex.Message}", ex);
+            }
+            files.AddRange(currentFiles);
+            foreach (string subdirectory in subdirectories)
+            {
+                directories.Add(subdirectory);
+                pending.Push(subdirectory);
+            }
+        }
+        return (files, directories);
     }
 
     /// <summary>
@@ -290,7 +330,8 @@ public sealed class Gp4Project
     /// Fills title / title-id / content-id from sce_sys/param.sfo when
     /// the caller did not supply explicit overrides.
     /// </summary>
-    private static void TryReadSfo(string folder, ref string? title, ref string? titleId, ref string? contentId)
+    private static void TryReadSfo(string folder, ref string? title, ref string? titleId,
+        ref string? contentId, ref string? appVersion, ref string? version)
     {
         // Standard locations after extract or restructure.
         string[] candidates = [
@@ -309,6 +350,10 @@ public sealed class Gp4Project
                 titleId = sfo.Values.FirstOrDefault(v => v.Key == "TITLE_ID")?.StringValue;
             if (contentId == null)
                 contentId = sfo.Values.FirstOrDefault(v => v.Key == "CONTENT_ID")?.StringValue;
+            if (appVersion == null)
+                appVersion = sfo.Values.FirstOrDefault(v => v.Key == "APP_VER")?.StringValue;
+            if (version == null)
+                version = sfo.Values.FirstOrDefault(v => v.Key == "VERSION")?.StringValue;
         }
         catch { /* best-effort — missing or unreadable SFO is not fatal */ }
     }
