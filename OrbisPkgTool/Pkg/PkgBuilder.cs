@@ -232,43 +232,58 @@ public static class PkgBuilder
         // outer.pfs) live under options.TempDirectory (the caller's work
         // directory) or %TEMP% when unset, while the final PKG lands on the
         // output drive — when these are different drives, each must be checked
-        // against its own requirement (the old code only checked the OUTPUT
-        // drive, so a C: %TEMP% with a D: output silently passed with no temp
-        // space).
+        // against its own requirement.
+        //
+        // The compressed copies are bounded by the caller's expected size
+        // (typically the original PKG size) when known; otherwise the guard
+        // falls back to the old worst case where each copy can equal the whole
+        // uncompressed inner PFS.
         long estInner = pfsFiles.Sum(f => (f.Length + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize * PfsFormat.BlockSize);
-        long requiredTemp = (long)(estInner * PfsFormat.TempDiskMultiplier) + estInner / 4;
-        long requiredOutput = estInner / 4 + estInner; // final PKG ≈ PFSC + header overhead
+        long? expectedCompressed = options.PfscMode == PfscMode.Compressed
+            ? options.ExpectedCompressedSize
+            : null;
+        long estCompressed = expectedCompressed.HasValue && expectedCompressed.Value > 0
+            ? Math.Min(estInner, (long)(expectedCompressed.Value * 1.1))
+            : estInner;
+        // inner.pfs + inner.pfsc + outer.pfs (outer ≈ pfsc), plus 15% headroom
+        // and 256 MB for headers/inodes. With no expected size this reduces to
+        // the old 3.45x worst-case estimate.
+        long requiredTemp = (long)((estInner + 2 * estCompressed) * 1.15) + 256L * 1024 * 1024;
+        long requiredOutput = estCompressed + estInner / 4 + 256L * 1024 * 1024;
         string tempBase = string.IsNullOrWhiteSpace(options.TempDirectory)
             ? Path.GetTempPath()
             : options.TempDirectory;
         string tempRoot = Path.GetPathRoot(Path.GetFullPath(tempBase)) ?? ".";
         string outRoot = Path.GetPathRoot(Path.GetFullPath(outputPath)) ?? ".";
-        if (string.Equals(tempRoot, outRoot, StringComparison.OrdinalIgnoreCase))
+        if (!options.SkipDiskSpaceCheck)
         {
-            var drive = new DriveInfo(tempRoot);
-            // Same volume: AssembleToFile writes the output .tmp while all
-            // three streaming temp files still exist (they are deleted only
-            // after the atomic move), so the peak is temp + output, not the
-            // larger of the two.
-            long peak = requiredTemp + requiredOutput;
-            if (drive.AvailableFreeSpace < peak)
-                throw new InvalidOperationException(
-                    $"Estimated disk requirement: {peak / 1e9:F1} GB (temp pipeline + output). " +
-                    $"Available on {drive.Name}: {drive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
-        }
-        else
-        {
-            var tempDrive = new DriveInfo(tempRoot);
-            if (tempDrive.AvailableFreeSpace < requiredTemp)
-                throw new InvalidOperationException(
-                    $"Estimated temporary disk requirement: {requiredTemp / 1e9:F1} GB. " +
-                    $"Available on {tempDrive.Name} (build temp: {tempBase}): {tempDrive.AvailableFreeSpace / 1e9:F1} GB. " +
-                    "Aborting before build (choose a work/temp folder with more space).");
-            var outDrive = new DriveInfo(outRoot);
-            if (outDrive.AvailableFreeSpace < requiredOutput)
-                throw new InvalidOperationException(
-                    $"Estimated output disk requirement: {requiredOutput / 1e9:F1} GB. " +
-                    $"Available on {outDrive.Name}: {outDrive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
+            if (string.Equals(tempRoot, outRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                var drive = new DriveInfo(tempRoot);
+                // Same volume: AssembleToFile writes the output .tmp while all
+                // three streaming temp files still exist (they are deleted only
+                // after the atomic move), so the peak is temp + output, not the
+                // larger of the two.
+                long peak = requiredTemp + requiredOutput;
+                if (drive.AvailableFreeSpace < peak)
+                    throw new InvalidOperationException(
+                        $"Estimated disk requirement: {peak / 1e9:F1} GB (temp pipeline + output). " +
+                        $"Available on {drive.Name}: {drive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
+            }
+            else
+            {
+                var tempDrive = new DriveInfo(tempRoot);
+                if (tempDrive.AvailableFreeSpace < requiredTemp)
+                    throw new InvalidOperationException(
+                        $"Estimated temporary disk requirement: {requiredTemp / 1e9:F1} GB. " +
+                        $"Available on {tempDrive.Name} (build temp: {tempBase}): {tempDrive.AvailableFreeSpace / 1e9:F1} GB. " +
+                        "Aborting before build (choose a work/temp folder with more space).");
+                var outDrive = new DriveInfo(outRoot);
+                if (outDrive.AvailableFreeSpace < requiredOutput)
+                    throw new InvalidOperationException(
+                        $"Estimated output disk requirement: {requiredOutput / 1e9:F1} GB. " +
+                        $"Available on {outDrive.Name}: {outDrive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
+            }
         }
 
         string tmpDir = Path.Combine(tempBase, $"pkgbuild_{Guid.NewGuid():N}");

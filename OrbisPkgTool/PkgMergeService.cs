@@ -26,6 +26,11 @@ public sealed record class PkgMergeRequest
     public bool KeepWorkDirectory { get; init; }
     /// <summary>Delete the merge workspace when the build fails or is cancelled.</summary>
     public bool CleanupWorkDirectoryOnFailure { get; init; }
+    /// <summary>
+    /// Skip the pre-flight disk-space guard. The caller explicitly accepted
+    /// the risk (e.g. the merge dialog's "ignore and continue" option).
+    /// </summary>
+    public bool SkipDiskSpaceCheck { get; init; }
     public string? Title { get; init; }
     public string? TitleId { get; init; }
     public string? ContentId { get; init; }
@@ -58,6 +63,7 @@ public sealed class PkgMergeService
 
         string basePath = Path.GetFullPath(request.BasePkgPath);
         string updatePath = Path.GetFullPath(request.UpdatePkgPath);
+        long expectedCompressedSize = SafeFileLength(basePath) + SafeFileLength(updatePath);
         string basePasscode = string.IsNullOrWhiteSpace(request.BasePasscode) ? PkgBuilder.DefaultPasscode : request.BasePasscode;
         string updatePasscode = string.IsNullOrWhiteSpace(request.UpdatePasscode) ? PkgBuilder.DefaultPasscode : request.UpdatePasscode;
         var baseInfo = ReadInfo(basePath, basePasscode);
@@ -98,7 +104,9 @@ public sealed class PkgMergeService
                 request.ContentId, PkgBuilder.DefaultPasscode, profile);
             File.WriteAllText(gp4Path, project.Serialize());
 
-            Report(request, "Building merged PKG", 6);
+            Report(request, request.SkipDiskSpaceCheck
+                ? "Building merged PKG (disk-space check skipped)"
+                : "Building merged PKG", 6);
             PkgBuilder.Build(gp4Path, image0, outputPath, new BuildOptions
             {
                 Passcode = PkgBuilder.DefaultPasscode,
@@ -110,6 +118,8 @@ public sealed class PkgMergeService
                 Quiet = true,
                 CancellationToken = ct,
                 TempDirectory = workDir,
+                ExpectedCompressedSize = expectedCompressedSize > 0 ? expectedCompressedSize : (long?)null,
+                SkipDiskSpaceCheck = request.SkipDiskSpaceCheck,
                 Progress = (stage, done, total) => Report(request, $"Building: {stage}", 6, currentBytes: done, totalBytes: total),
             });
             if (!File.Exists(outputPath)) throw new InvalidOperationException("PKG build completed without creating an output package.");
@@ -147,6 +157,11 @@ public sealed class PkgMergeService
     }
 
     private static PkgInfo ReadInfo(string path, string passcode) { using var reader = new PkgReader(path, passcode); return reader.GetInfo(); }
+    private static long SafeFileLength(string path)
+    {
+        try { return new FileInfo(path).Length; }
+        catch { return 0; }
+    }
     internal static void ValidatePackages(string basePath, string updatePath, PkgInfo baseInfo, PkgInfo updateInfo)
     {
         if (baseInfo.Type != PkgType.Game) throw new InvalidOperationException($"Base PKG must be a base Game PKG; '{basePath}' is {baseInfo.Type}.");

@@ -90,4 +90,19 @@ public sealed class BuildOptions
     /// does not abort a build the work drive has room for.
     /// </summary>
     public string? TempDirectory { get; set; }
+
+    /// <summary>
+    /// Optional upper bound for the rebuilt compressed PFSC size (typically
+    /// the original PKG size). When set, the large-build disk guard uses it to
+    /// bound the PFSC/outer temp copies instead of assuming they can each equal
+    /// the whole uncompressed inner PFS. Null falls back to the worst-case
+    /// 3.45x estimate.
+    /// </summary>
+    public long? ExpectedCompressedSize { get; set; }
+
+    /// <summary>
+    /// Skip the pre-flight disk-space guard. The caller has explicitly accepted
+    /// the risk (e.g. a merge dialog "ignore and continue").
+    /// </summary>
+    public bool SkipDiskSpaceCheck { get; set; }
 }
