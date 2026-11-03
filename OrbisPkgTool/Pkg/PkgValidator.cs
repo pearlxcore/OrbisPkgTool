@@ -34,6 +34,12 @@ public sealed class ValidationOptions
     /// values still hard-fail. Default: false (strict — every mismatch throws).
     /// </summary>
     public bool FakeTolerant { get; init; }
+
+    /// <summary>
+    /// Parent directory for the inner-PFS scratch file written during stage 4.
+    /// Null/empty falls back to <see cref="System.IO.Path.GetTempPath"/>.
+    /// </summary>
+    public string? TempDirectory { get; init; }
 }
 
 /// <summary>
@@ -49,8 +55,9 @@ public static class PkgValidator
     /// Throws <see cref="ValidationFailure"/> on the first violated invariant.
     /// </summary>
     public static void ValidatePkgFile(string pkgPath, string passcode,
-        Action<string, string>? report = null)
-        => ValidatePkgFile(pkgPath, passcode, new ValidationOptions(), report, null);
+        Action<string, string>? report = null, string? tempDirectory = null)
+        => ValidatePkgFile(pkgPath, passcode,
+            new ValidationOptions { TempDirectory = tempDirectory }, report, null);
 
     /// <summary>
     /// Runs the full 8-stage validation with explicit options. In fake-tolerant mode,
@@ -107,7 +114,11 @@ public static class PkgValidator
         // ---- Stage 4: inner PFS ----
         report?.Invoke("4", "inner PFS");
         // The inner PFS can exceed 2 GB — never buffer it in a MemoryStream.
-        string tmpInner = Path.Combine(Path.GetTempPath(), $"opt_validate_{Guid.NewGuid():N}.pfs");
+        string tempBase = string.IsNullOrWhiteSpace(options.TempDirectory)
+            ? Path.GetTempPath()
+            : options.TempDirectory;
+        Directory.CreateDirectory(tempBase);
+        string tmpInner = Path.Combine(tempBase, $"opt_validate_{Guid.NewGuid():N}.pfs");
         try
         {
             reader.ExtractRawInnerPfs(tmpInner);

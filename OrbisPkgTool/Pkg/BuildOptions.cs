@@ -81,4 +81,13 @@ public sealed class BuildOptions
 
     /// <summary>Cancellation token — abort mid-build with clean temp cleanup.</summary>
     public System.Threading.CancellationToken CancellationToken { get; set; }
+
+    /// <summary>
+    /// Parent directory for the large-build streaming temp files
+    /// (inner.pfs / inner.pfsc / outer.pfs). Null/empty falls back to
+    /// <see cref="System.IO.Path.GetTempPath"/> (%TEMP%). Callers that own a
+    /// work directory (e.g. PKG merge) pass it so a small system TMP drive
+    /// does not abort a build the work drive has room for.
+    /// </summary>
+    public string? TempDirectory { get; set; }
 }

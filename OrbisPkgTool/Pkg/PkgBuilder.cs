@@ -160,7 +160,7 @@ public static class PkgBuilder
             try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
         }
         if (options.Validate)
-            PkgValidator.ValidatePkgFile(outputPath, passcode);
+            PkgValidator.ValidatePkgFile(outputPath, passcode, tempDirectory: options.TempDirectory);
         if (options.ManifestPath != null)
             WriteManifest(options.ManifestPath, project, pfsBytes.Select(f => (f.TargetPath, (long)f.Data.Length)).ToList(),
                 sc0Files, inner.Length, pfsc.Length, outer.Length,
@@ -227,24 +227,31 @@ public static class PkgBuilder
         var ct = options.CancellationToken;
 
         // Pre-flight disk-space estimate. Temp files (inner.pfs + inner.pfsc +
-        // outer.pfs) live under %TEMP%, while the final PKG lands on the output
-        // drive — when these are different drives, each must be checked against
-        // its own requirement (the old code only checked the OUTPUT drive, so a
-        // C: %TEMP% with a D: output silently passed with no temp space).
+        // outer.pfs) live under options.TempDirectory (the caller's work
+        // directory) or %TEMP% when unset, while the final PKG lands on the
+        // output drive — when these are different drives, each must be checked
+        // against its own requirement (the old code only checked the OUTPUT
+        // drive, so a C: %TEMP% with a D: output silently passed with no temp
+        // space).
         long estInner = pfsFiles.Sum(f => (f.Length + PfsFormat.BlockSize - 1) / PfsFormat.BlockSize * PfsFormat.BlockSize);
         long requiredTemp = (long)(estInner * PfsFormat.TempDiskMultiplier) + estInner / 4;
         long requiredOutput = estInner / 4 + estInner; // final PKG ≈ PFSC + header overhead
-        string tempRoot = Path.GetPathRoot(Path.GetFullPath(Path.GetTempPath())) ?? ".";
+        string tempBase = string.IsNullOrWhiteSpace(options.TempDirectory)
+            ? Path.GetTempPath()
+            : options.TempDirectory;
+        string tempRoot = Path.GetPathRoot(Path.GetFullPath(tempBase)) ?? ".";
         string outRoot = Path.GetPathRoot(Path.GetFullPath(outputPath)) ?? ".";
         if (string.Equals(tempRoot, outRoot, StringComparison.OrdinalIgnoreCase))
         {
             var drive = new DriveInfo(tempRoot);
-            // Same volume: the temp files are deleted before the PKG reaches
-            // full size, so the peak is max(temp, output), not the sum.
-            long peak = Math.Max(requiredTemp, requiredOutput);
+            // Same volume: AssembleToFile writes the output .tmp while all
+            // three streaming temp files still exist (they are deleted only
+            // after the atomic move), so the peak is temp + output, not the
+            // larger of the two.
+            long peak = requiredTemp + requiredOutput;
             if (drive.AvailableFreeSpace < peak)
                 throw new InvalidOperationException(
-                    $"Estimated disk requirement: {peak / 1e9:F1} GB (temp pipeline or output, whichever peaks). " +
+                    $"Estimated disk requirement: {peak / 1e9:F1} GB (temp pipeline + output). " +
                     $"Available on {drive.Name}: {drive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
         }
         else
@@ -253,8 +260,8 @@ public static class PkgBuilder
             if (tempDrive.AvailableFreeSpace < requiredTemp)
                 throw new InvalidOperationException(
                     $"Estimated temporary disk requirement: {requiredTemp / 1e9:F1} GB. " +
-                    $"Available on {tempDrive.Name} (%TEMP%): {tempDrive.AvailableFreeSpace / 1e9:F1} GB. " +
-                    "Aborting before build (set TMP to a drive with more space).");
+                    $"Available on {tempDrive.Name} (build temp: {tempBase}): {tempDrive.AvailableFreeSpace / 1e9:F1} GB. " +
+                    "Aborting before build (choose a work/temp folder with more space).");
             var outDrive = new DriveInfo(outRoot);
             if (outDrive.AvailableFreeSpace < requiredOutput)
                 throw new InvalidOperationException(
@@ -262,7 +269,7 @@ public static class PkgBuilder
                     $"Available on {outDrive.Name}: {outDrive.AvailableFreeSpace / 1e9:F1} GB. Aborting before build.");
         }
 
-        string tmpDir = Path.Combine(Path.GetTempPath(), $"pkgbuild_{Guid.NewGuid():N}");
+        string tmpDir = Path.Combine(tempBase, $"pkgbuild_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tmpDir);
         string innerPath = Path.Combine(tmpDir, "inner.pfs");
         string pfscPath = Path.Combine(tmpDir, "inner.pfsc");
@@ -314,7 +321,7 @@ public static class PkgBuilder
             }
 
             if (options.Validate)
-                PkgValidator.ValidatePkgFile(outputPath, passcode);
+                PkgValidator.ValidatePkgFile(outputPath, passcode, tempDirectory: options.TempDirectory);
             if (options.ManifestPath != null)
             {
                 long outerSize = new FileInfo(outerPath).Length;

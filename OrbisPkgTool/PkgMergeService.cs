@@ -109,6 +109,7 @@ public sealed class PkgMergeService
                 Workers = request.WorkerCount,
                 Quiet = true,
                 CancellationToken = ct,
+                TempDirectory = workDir,
                 Progress = (stage, done, total) => Report(request, $"Building: {stage}", 6, currentBytes: done, totalBytes: total),
             });
             if (!File.Exists(outputPath)) throw new InvalidOperationException("PKG build completed without creating an output package.");
@@ -120,7 +121,8 @@ public sealed class PkgMergeService
                     report: (stage, item) => Report(request, $"Validating: {stage}", 7,
                         current: int.TryParse(stage, System.Globalization.NumberStyles.Integer,
                             System.Globalization.CultureInfo.InvariantCulture, out int vs) ? vs - 1 : 0,
-                        total: ValidationStages, currentFile: item));
+                        total: ValidationStages, currentFile: item),
+                    tempDirectory: workDir);
             }
             stopwatch.Stop();
             bool kept = KeepOrCleanup(workDir, outputPath, request.KeepWorkDirectory);
